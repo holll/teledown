@@ -6,8 +6,15 @@ __pycache__/
 # C extensions
 *.so
 
+# config
+config.*
+!config.example.*
+*.session
+
 # Distribution / packaging
+tmp/
 .Python
+.idea/
 build/
 develop-eggs/
 dist/
