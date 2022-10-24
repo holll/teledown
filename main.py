@@ -1,8 +1,8 @@
 import json
 import os.path
-import platform
 import sys
 
+import socks
 from telethon import TelegramClient
 from telethon.tl import types
 from tqdm import tqdm
@@ -16,16 +16,10 @@ with open(config_path, 'r', encoding='utf-8') as f:
 api_id = config.get('api_id')
 api_hash = config.get('api_hash')
 save_path = config.get('save_path')
-system_type = platform.system()
-if system_type != 'Linux':
-    import socks
-
-    client = TelegramClient('python', api_id, api_hash, proxy=(socks.SOCKS5, 'localhost', 7890))
-    save_path = './tmp/'
+proxy_port = config.get('proxy_port')
+if proxy_port is not None:
+    client = TelegramClient('python', api_id, api_hash, proxy=(socks.SOCKS5, 'localhost', proxy_port))
 else:
-    # pid = check_output(['fuser', 'python.session'])
-    # if pid:
-    #     check_output(['kill', pid])
     client = TelegramClient('python', api_id, api_hash)
 # 配置处理结束
 
@@ -112,14 +106,19 @@ async def download_file(channel_title, message):
     # print(message.sender.id, message.raw_text)
 
 
-async def getHistoryMessage(chat_id, history):
+async def getHistoryMessage(chat_id, plus_func):
     channelData = await client.get_entity(chat_id)
     channel_title = channelData.title
 
     messages = client.iter_messages(chat_id)
     async for message in messages:
-        if history is not None and message.id < history:
-            return
+        # 0表示不执行操作，1表示continue，2表示break
+        switch = can_continue(message.id, plus_func)
+        print(switch)
+        if switch == 1:
+            continue
+        elif switch == 2:
+            break
         if message.media is not None:
             # 下载媒体
             # print(f'开始转发{message.message}')
@@ -135,6 +134,29 @@ async def upDate_dialogs():
     await client.get_dialogs()
 
 
+def can_continue(_id, plus_func):
+    need_id = int(plus_func[1:])
+    if plus_func[0] == '=':
+        if need_id > _id:
+            return 2
+        elif need_id < _id:
+            return 1
+        else:
+            return 0
+    elif plus_func[0] == '>':
+        if need_id < _id:
+            return 0
+        else:
+            return 2
+    elif plus_func[0] == '<':
+        if need_id > _id:
+            return 0
+        else:
+            return 1
+    else:
+        return 2
+
+
 # 展示登陆的信息
 def show_my_inf(me):
     print("-----****************-----")
@@ -143,12 +165,12 @@ def show_my_inf(me):
     print("-----login successful-----")
 
 
-async def client_main(chat_id, history=None):
+async def client_main(chat_id, plus_func):
     print("-client-main-")
     me = await client.get_me()
     show_my_inf(me)
     # await client.get_dialogs()
-    await getHistoryMessage(int(chat_id), history)
+    await getHistoryMessage(int(chat_id), plus_func)
     # await client.run_until_disconnected()
 
 
@@ -163,20 +185,23 @@ def print_all_channel():
 
 if __name__ == '__main__':
     with client:
+        plus_func = '>0'
         if len(sys.argv) == 1:
             select = input('功能选择：\n1、查看所有频道\n2、下载频道资源\n')
             channel_id = None
-            history = None
         else:
             select = '2'
-            channel_id = sys.argv[1]
-            if len(sys.argv) == 3:
-                history = int(sys.argv[2])
+            if 't.me' in sys.argv[1]:
+                tmpList = sys.argv[1].split('/')
+                channel_id = tmpList[-2]
+                plus_func = '=' + tmpList[-1]
             else:
-                history = None
+                channel_id = sys.argv[1]
+                if len(sys.argv) == 3:
+                    plus_func = sys.argv[2]
         if select == '1':
             print_all_channel()
         else:
             if channel_id is None:
                 channel_id = input('频道id：')
-            client.loop.run_until_complete(client_main(channel_id, history))
+            client.loop.run_until_complete(client_main(channel_id, plus_func))

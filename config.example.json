@@ -1,5 +1,6 @@
 {
   "api_id": 12345678,
   "api_hash": "123456781234567812345678",
-  "save_path": "/home/teledown/"
+  "save_path": "/home/teledown/",
+  "proxy_port": 7890
 }
