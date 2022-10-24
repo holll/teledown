@@ -114,7 +114,6 @@ async def getHistoryMessage(chat_id, plus_func):
     async for message in messages:
         # 0表示不执行操作，1表示continue，2表示break
         switch = can_continue(message.id, plus_func)
-        print(switch)
         if switch == 1:
             continue
         elif switch == 2:
