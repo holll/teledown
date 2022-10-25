@@ -134,7 +134,9 @@ async def upDate_dialogs():
 
 
 def can_continue(_id, plus_func):
-    need_id = int(plus_func[1:])
+    need_id = 0
+    if plus_func[0] != '|':
+        need_id = int(plus_func[1:])
     if plus_func[0] == '=':
         if need_id > _id:
             return 2
@@ -152,6 +154,19 @@ def can_continue(_id, plus_func):
             return 0
         else:
             return 1
+    elif plus_func[0] == '|':
+        tmpId = plus_func[1:].split('|')
+        a_id = int(tmpId[0])
+        b_id = int(tmpId[-1])
+        if a_id >= b_id:
+            print('消息id范围错误')
+            return 2
+        if _id > tmpId[-1]:
+            return 1
+        elif _id < tmpId[0]:
+            return 2
+        else:
+            return 0
     else:
         return 2
 
