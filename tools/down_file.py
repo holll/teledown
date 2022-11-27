@@ -54,18 +54,6 @@ async def download_file(channel_title, message):
 async def down_group(client: TelegramClient, chat_id, plus_func: str):
     channel_title, messages = await tools.tool.getHistoryMessage(client, int(chat_id))
     async for message in messages:
-        # 0表示不执行操作，1表示continue，2表示break
-        switch = tools.tool.can_continue(message.id, plus_func)
-        if switch == 1:
-            continue
-        elif switch == 2:
-            break
         if message.media is not None:
-            # 下载媒体
-            # print(f'开始转发{message.message}')
-            # message.message += f' #{chat_id}'
-
-            # await client.send_message(-1001877389961, message)
-            # await message.forward_to(-1001877389961)
             await download_file(channel_title, message)
     print(channel_title, '全部下载完成')

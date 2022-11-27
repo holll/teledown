@@ -1,13 +1,13 @@
+import datetime
 import json
 import os
-import sys
 
 import socks
+import telethon.tl.custom
 from telethon import TelegramClient
-from telethon.tl import types
 
-from tools.down_file import down_group
-from tools.tool import print_all_channel
+import tools.execSql as execSql
+from tools.tool import getHistoryMessage
 
 config_path = './config.json'
 # 配置处理开始
@@ -48,26 +48,61 @@ async def client_main():
     show_my_inf(me)
 
 
+def analInfo(message: telethon.tl.custom.Message):
+    title = ''
+    viewKey = ''
+    author = ''
+    date = '1970-01-01'
+    needPay = 0
+    messageId = message.id
+    url = 'https://t.me/c/%s/' % message.peer_id.channel_id
+    if message.message is None:
+        return title, viewKey, author, date, messageId, needPay, False
+    rawInfo = message.message.split('\n')
+    rawInfoLen = len(rawInfo)
+    if rawInfoLen < 3 or rawInfoLen > 5 or 'Viewkey' not in message.message:
+        print('信息格式异常\n', rawInfo, url + str(message.id))
+        return title, viewKey, author, date, messageId, needPay, False
+    if rawInfoLen == 5:
+        if '付费' in rawInfo[0]:
+            needPay = 1
+            rawInfo.pop(0)
+            rawInfoLen = len(rawInfo)
+        else:
+            print('信息格式异常', rawInfo, url + str(message.id))
+            return title, viewKey, author, date, messageId, needPay, False
+    if rawInfoLen == 3:
+        rawInfo.insert(0, '')
+        # rawInfoLen = len(rawInfo)
+    title = rawInfo[0].strip()
+    viewKey = rawInfo[1].split(':')[-1].strip()
+    author = rawInfo[2].split('#')[-1].strip()
+    date = datetime.datetime.strptime(rawInfo[3].split('on')[-1].strip(), "%Y%m%d").strftime("%Y-%m-%d")
+    return title, viewKey, author, date, messageId, needPay, True
+
+
+async def collect_group(client: TelegramClient, chat_id: str, isAll: bool):
+    db = execSql.ReadSQL('./data/data.db')
+    maxId = db.getMaxId()
+    if maxId is None:
+        maxId = 0
+    channel_title, messages = await getHistoryMessage(client, int(chat_id))
+    async for message in messages:
+        if message.id <= maxId and isAll:
+            break
+        title, viewKey, author, date, _id, needPay, status = analInfo(message)
+        if status:
+            print(title, viewKey, author, date)
+            if not db.insertDb(title, viewKey, author, date, _id, needPay):
+                print(message.message)
+        else:
+            break
+    print(channel_title, '全部下载完成')
+    db.conn.commit()
+    db.closeDb()
+
+
 if __name__ == '__main__':
     with client:
         client.loop.run_until_complete(client_main())
-        plus_func = '>0'
-        if len(sys.argv) == 1:
-            select = input('功能选择：\n1、查看所有频道\n2、下载频道资源\n')
-            channel_id = None
-        else:
-            select = '2'
-            if 't.me' in sys.argv[1]:
-                tmpList = sys.argv[1].split('/')
-                channel_id = tmpList[-2]
-                plus_func = '=' + tmpList[-1]
-            else:
-                channel_id = sys.argv[1]
-                if len(sys.argv) == 3:
-                    plus_func = sys.argv[2]
-        if select == '1':
-            print_all_channel(client=client, need_type=types.Channel)
-        else:
-            if channel_id is None:
-                channel_id = input('频道id：')
-            client.loop.run_until_complete(down_group(client, channel_id, plus_func))
+        client.loop.run_until_complete(collect_group(client, '1178953801', True))
