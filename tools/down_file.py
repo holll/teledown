@@ -1,4 +1,5 @@
 import os
+import re
 
 from telethon import TelegramClient
 from telethon.tl import types
@@ -52,6 +53,11 @@ async def download_file(channel_title, message):
 
 
 async def down_group(client: TelegramClient, chat_id, plus_func: str):
+    # 检测chat_id是id还是昵称
+    isId = re.match(r'-?[1-9][0-9]{4,}',chat_id)
+    if isId is None:
+        entity = await client.get_entity(chat_id)
+        chat_id = entity.id
     channel_title, messages = await tools.tool.getHistoryMessage(client, int(chat_id))
     async for message in messages:
         # 0表示不执行操作，1表示continue，2表示break
