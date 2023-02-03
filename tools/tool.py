@@ -28,7 +28,7 @@ async def getHistoryMessage(client: TelegramClient, chat_id: int):
 
 def can_continue(_id, plus_func):
     need_id = 0
-    if plus_func[0] != '|':
+    if plus_func[0] != 's':
         need_id = int(plus_func[1:])
     if plus_func[0] == '=':
         if need_id > _id:
@@ -47,16 +47,16 @@ def can_continue(_id, plus_func):
             return 0
         else:
             return 1
-    elif plus_func[0] == '|':
-        tmpId = plus_func[1:].split('|')
-        a_id = int(tmpId[0])
-        b_id = int(tmpId[-1])
-        if a_id >= b_id:
+    elif plus_func[0] == 's':
+        tmpId = plus_func[1:].split('s')
+        min_id = int(tmpId[0])
+        max_id = int(tmpId[-1])
+        if min_id >= max_id:
             print('消息id范围错误')
             return 2
-        if _id > tmpId[-1]:
+        if _id > max_id:
             return 1
-        elif _id < tmpId[0]:
+        elif _id < min_id:
             return 2
         else:
             return 0
