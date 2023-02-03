@@ -26,7 +26,8 @@ async def download_file(channel_title, channel_id, message):
             message.message = str(message.photo.id)
         else:
             message.message = str(message.document.id)
-    # channel_title += '/'
+    else:
+        message.message = demoji.replace(message.message, '[emoji]')
     message.message = shorten_filename(message.message)
     if is_photo:
         file_type = 'jpg'
