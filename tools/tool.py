@@ -1,5 +1,7 @@
 from telethon import TelegramClient
 from telethon.tl import types,patched
+from telethon.tl.types import PeerChannel
+
 
 def shorten_filename(filename, limit=50):
     filename = filename.replace('\n', ' ')
@@ -19,7 +21,7 @@ def print_all_channel(client: TelegramClient, need_type: types):
 
 
 async def getHistoryMessage(client: TelegramClient, chat_id: int):
-    channelData = await client.get_entity(chat_id)
+    channelData = await client.get_entity(PeerChannel(chat_id))
     channel_title = channelData.title
     messages = client.iter_messages(chat_id)
     return channel_title, messages
