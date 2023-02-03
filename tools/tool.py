@@ -28,7 +28,7 @@ async def getHistoryMessage(client: TelegramClient, chat_id: int):
 
 def can_continue(_id, plus_func):
     need_id = 0
-    if plus_func[0] != '|':
+    if plus_func[0] != 's':
         need_id = int(plus_func[1:])
     if plus_func[0] == '=':
         if need_id > _id:
