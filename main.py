@@ -49,7 +49,12 @@ async def client_main():
 
 
 if __name__ == '__main__':
-    with client:
+    phone = config.get('phone')
+    bot_token = config.get('bot_token')
+    if phone is not None and bot_token is not None:
+        print('请确认使用机器人登录还是电话号码登录')
+        exit()
+    with client.start(phone=phone,bot_token=bot_token):
         client.loop.run_until_complete(client_main())
         plus_func = '>0'
         if len(sys.argv) == 1:

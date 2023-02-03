@@ -1,5 +1,6 @@
 from telethon import TelegramClient
-from telethon.tl import types,patched
+from telethon.tl import types
+
 
 def shorten_filename(filename, limit=50):
     filename = filename.replace('\n', ' ')
