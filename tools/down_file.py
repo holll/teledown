@@ -10,6 +10,7 @@ from tools.tool import shorten_filename
 from tools.tqdm import TqdmUpTo
 
 
+# TODO 或许能加快下载速度的方法（https://gist.github.com/painor/7e74de80ae0c819d3e9abcf9989a8dd6）
 async def download_file(channel_title, channel_id, message):
     # 获取媒体类型
     is_webpage = isinstance(message.media, types.MessageMediaWebPage)
