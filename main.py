@@ -18,9 +18,12 @@ with open(config_path, 'r', encoding='utf-8') as f:
 api_id = config.get('api_id')
 api_hash = config.get('api_hash')
 os.environ['save_path'] = save_path = config.get('save_path')
+proxy_ip = config.get('proxy_ip')
 proxy_port = config.get('proxy_port')
 if proxy_port is not None:
-    client = TelegramClient('python', api_id, api_hash, proxy=(socks.SOCKS5, 'localhost', proxy_port))
+    if proxy_ip is None:
+        proxy_ip = '127.0.0.1'
+    client = TelegramClient('python', api_id, api_hash, proxy=(socks.SOCKS5, proxy_ip, proxy_port))
 else:
     client = TelegramClient('python', api_id, api_hash)
 # 配置处理结束
@@ -54,7 +57,7 @@ if __name__ == '__main__':
     if phone is not None and bot_token is not None:
         print('请确认使用机器人登录还是电话号码登录')
         exit()
-    with client.start(phone=phone,bot_token=bot_token):
+    with client.start(phone=phone, bot_token=bot_token):
         client.loop.run_until_complete(client_main())
         plus_func = '>0'
         if len(sys.argv) == 1:
