@@ -40,17 +40,17 @@ def getFileSize(message, is_doc: bool, is_photo: bool):
     return file_size
 
 
-def GetFileName(message, hasRawName: bool) -> str:
-    if hasRawName:
-        return message.media.document.attributes[-1].file_name
-    else:
-        # 如果文件有文字说明，则用文件说明来命名
+def GetFileName(message, is_photo:bool) -> str:
+    if is_photo:
         if len(message.message) != 0:
             sName = shorten_filename(demoji.replace(message.message, '[emoji]'))
             return re.sub(r'[\\/:*?"<>|]', '_', sName)
         # 否则用消息id来命名
         else:
             return str(message.photo.id) + '.jpg'
+    else:
+        return message.media.document.attributes[-1].file_name
+
 
 
 async def download_file(channel_title, channel_id, message):
@@ -61,8 +61,7 @@ async def download_file(channel_title, channel_id, message):
     # 如果不是文件就放弃（可能是音频文字啥的）
     if not (is_photo or is_doc):
         return
-    hasRawName = hasattr(message.media.document.attributes[-1], 'file_name')
-    file_name = GetFileName(message, hasRawName)
+    file_name = GetFileName(message, is_photo)
     file_path = f'{os.environ["save_path"]}/{channel_title}-{channel_id}/{file_name}'
     file_size = getFileSize(message, is_doc=is_doc, is_photo=is_photo)
     ret, file_path = fileExist(file_path, file_size)
