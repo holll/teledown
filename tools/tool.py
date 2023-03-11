@@ -1,3 +1,7 @@
+import os
+import shutil
+import sys
+
 from telethon import TelegramClient
 from telethon.tl import types
 
