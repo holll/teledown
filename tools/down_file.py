@@ -44,7 +44,7 @@ def GetFileName(message, is_photo: bool) -> str:
     if is_photo:
         if len(message.message) != 0:
             sName = shorten_filename(demoji.replace(message.message, '[emoji]'))
-            return re.sub(r'[\\/:*?"<>|]', '_', sName)
+            return re.sub(r'[\\/:*?"<>|]', '_', sName) + '.jpg'
         # 否则用消息id来命名
         else:
             return str(message.photo.id) + '.jpg'
