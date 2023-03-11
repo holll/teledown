@@ -25,7 +25,7 @@ async def getHistoryMessage(client: TelegramClient, chat_id: int, plus_func=None
     if plus_func is not None and plus_func[:1] == '=':
         messages = client.iter_messages(chat_id, ids=int(plus_func[1:]))
     else:
-        messages = client.iter_messages(chat_id, ids=int(plus_func[1:]))
+        messages = client.iter_messages(chat_id)
     return channel_title, messages
 
 
