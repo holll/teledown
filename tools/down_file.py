@@ -40,7 +40,7 @@ def getFileSize(message, is_doc: bool, is_photo: bool):
     return file_size
 
 
-def GetFileName(message, is_photo:bool) -> str:
+def GetFileName(message, is_photo: bool) -> str:
     if is_photo:
         if len(message.message) != 0:
             sName = shorten_filename(demoji.replace(message.message, '[emoji]'))
@@ -50,7 +50,6 @@ def GetFileName(message, is_photo:bool) -> str:
             return str(message.photo.id) + '.jpg'
     else:
         return message.media.document.attributes[-1].file_name
-
 
 
 async def download_file(channel_title, channel_id, message):
@@ -88,7 +87,7 @@ async def down_group(client: TelegramClient, chat_id, plus_func: str):
     if isId is None:
         entity = await client.get_entity(chat_id)
         chat_id = entity.id
-    channel_title, messages = await tools.tool.getHistoryMessage(client, int(chat_id))  # messages是倒序的
+    channel_title, messages = await tools.tool.getHistoryMessage(client, int(chat_id), plus_func)  # messages是倒序的
     # 频道名称中的表情转文字，以兼容不同字符集设备
     channel_title = demoji.replace(channel_title, '[emoji]')
     channel_title = re.sub(r'[\\/:*?"<>|]', '', channel_title)
