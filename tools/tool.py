@@ -19,10 +19,13 @@ def print_all_channel(client: TelegramClient, need_type: types):
             print(d.entity.title, d.entity.id)
 
 
-async def getHistoryMessage(client: TelegramClient, chat_id: int):
+async def getHistoryMessage(client: TelegramClient, chat_id: int, plus_func=None):
     channelData = await client.get_entity(chat_id)
     channel_title = channelData.title
-    messages = client.iter_messages(chat_id)
+    if plus_func is not None and plus_func[:1] == '=':
+        messages = client.iter_messages(chat_id, ids=int(plus_func[1:]))
+    else:
+        messages = client.iter_messages(chat_id, ids=int(plus_func[1:]))
     return channel_title, messages
 
 
