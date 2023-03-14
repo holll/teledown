@@ -53,7 +53,6 @@ async def download_file(channel_title, channel_id, message):
     file_path = f'{os.environ["save_path"]}/{channel_title}-{channel_id}/{file_name}'
     file_size = message.file.size
     ret, file_path = fileExist(file_path, file_size)
-    print(message)
     if not ret:
         # 已经判断文件不存在，并且保证了文件名不重复
         download_path = file_path + '.downloading'
