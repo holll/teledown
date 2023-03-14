@@ -1,5 +1,7 @@
 import os
 import re
+import sys
+from asyncio import CancelledError
 
 import demoji
 import pandas as pd
@@ -27,21 +29,8 @@ def fileExist(file_path: str, file_size):
     return False, temp
 
 
-# 获取服务器的文件大小
-def getFileSize(message, is_doc: bool, is_photo: bool):
-    file_size = 0
-    if is_doc:
-        file_size = message.media.document.size
-    elif is_photo:
-        if hasattr(message.media.photo.sizes[-1], 'sizes'):
-            file_size = message.media.photo.sizes[-1].sizes[-1]
-        if hasattr(message.media.photo.sizes[-1], 'size'):
-            file_size = message.media.photo.sizes[-1].size
-    return file_size
-
-
 def GetFileName(message, is_photo: bool) -> str:
-    if is_photo:
+    if is_photo or not hasattr(message.media.document.attributes[-1], 'file_name'):
         if len(message.message) != 0:
             sName = shorten_filename(demoji.replace(message.message, '[emoji]'))
             return re.sub(r'[\\/:*?"<>|]', '_', sName) + '.jpg'
@@ -62,8 +51,9 @@ async def download_file(channel_title, channel_id, message):
         return
     file_name = GetFileName(message, is_photo)
     file_path = f'{os.environ["save_path"]}/{channel_title}-{channel_id}/{file_name}'
-    file_size = getFileSize(message, is_doc=is_doc, is_photo=is_photo)
+    file_size = message.file.size
     ret, file_path = fileExist(file_path, file_size)
+    print(message)
     if not ret:
         # 已经判断文件不存在，并且保证了文件名不重复
         download_path = file_path + '.downloading'
@@ -72,6 +62,10 @@ async def download_file(channel_title, channel_id, message):
             with TqdmUpTo(unit='B', unit_scale=True, unit_divisor=1024, total=file_size,
                           bar_format=TqdmUpTo.bar_format, desc=message.message[:10]) as bar:
                 await message.download_media(download_path, progress_callback=bar.update_to)
+        except CancelledError:
+            print("取消下载")
+            os.remove(download_path)
+            sys.exit()
         except Exception as e:
             print("下载出错", e.__class__.__name__)
             os.remove(download_path)
@@ -150,7 +144,7 @@ async def print_group(client: TelegramClient, chat_id, plus_func: str):
             file_name = message.message + '.' + file_type
             file_name = re.sub(r'[\\/:*?"<>|]', '_', file_name)
 
-            file_size = getFileSize(message, is_doc=is_doc, is_photo=is_photo)
+            file_size = message.file.size
             file_size = f'{round(file_size / 1024 ** 2, 2)}MB' if file_size > 1024 ** 2 else f'{round(file_size / 1024, 2)}KB'
             link = f'https://t.me/c/{chat_id}/{message.id}'
             links.append(link)
