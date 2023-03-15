@@ -30,24 +30,44 @@ def fileExist(file_path: str, file_size):
 
 
 def GetFileName(message, is_photo: bool) -> str:
-    if is_photo or not hasattr(message.media.document.attributes[-1], 'file_name'):
-        if len(message.message) != 0:
-            sName = shorten_filename(demoji.replace(message.message, '[emoji]'))
-            return re.sub(r'[\\/:*?"<>|]', '_', sName) + '.jpg'
-        # 否则用消息id来命名
-        else:
-            return str(message.photo.id) + '.jpg'
-    else:
+    # 取名优先级，文件名>描述>ID
+    if not is_photo and hasattr(message.media.document.attributes[-1], 'file_name'):
         return message.media.document.attributes[-1].file_name
+
+    if len(message.message) != 0:
+        sName = shorten_filename(demoji.replace(message.message, '[emoji]'))
+        return re.sub(r'[\\/:*?"<>|]', '_', sName) + '.' + GetFileSuffix(message)[1]
+
+    return GetFileId(message) + '.' + GetFileSuffix(message)[1]
+
+
+def GetFileId(message) -> str:
+    _id = 'unknown'
+    if hasattr(message.media, 'document'):
+        _id = message.media.document.id
+    elif hasattr(message.media, 'photo'):
+        _id = message.media.photo.id
+    return str(_id)
+
+
+def GetFileSuffix(message) -> list:
+    mime_type = 'unknown/unknown'
+    if hasattr(message.media, 'document'):
+        mime_type = message.media.document.mime_type
+    elif hasattr(message.media, 'photo'):
+        mime_type = 'image/jpg'
+    return mime_type.split('/')
 
 
 async def download_file(channel_title, channel_id, message):
+    media_type = GetFileSuffix(message)[0]
     # 获取媒体类型
-    is_photo = isinstance(message.media, types.MessageMediaPhoto)
-    is_doc = isinstance(message.media, types.MessageMediaDocument)
+    is_photo = media_type == 'image'
+    is_video = media_type == 'video'
+    is_audio = media_type == 'audio'
 
     # 如果不是文件就放弃（可能是音频文字啥的）
-    if not (is_photo or is_doc):
+    if not (is_photo or is_video or is_audio):
         return
     file_name = GetFileName(message, is_photo)
     file_path = f'{os.environ["save_path"]}/{channel_title}-{channel_id}/{file_name}'
