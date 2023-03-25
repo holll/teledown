@@ -31,14 +31,14 @@ def fileExist(file_path: str, file_size):
 
 def GetFileName(message, is_photo: bool) -> str:
     # 取名优先级，文件名>描述>ID
-    if not is_photo and hasattr(message.media.document.attributes[-1], 'file_name'):
-        return message.media.document.attributes[-1].file_name
+    if message.file.name:
+        return message.file.name
 
     if len(message.message) != 0:
         sName = shorten_filename(demoji.replace(message.message, '[emoji]'))
-        return re.sub(r'[\\/:*?"<>|]', '_', sName) + '.' + GetFileSuffix(message)[1]
+        return re.sub(r'[\\/:*?"<>|]', '_', sName) + '.' + message.file.ext
 
-    return GetFileId(message) + '.' + GetFileSuffix(message)[1]
+    return GetFileId(message) + '.' + message.file.ext
 
 
 def GetFileId(message) -> str:
@@ -60,6 +60,7 @@ def GetFileSuffix(message) -> list:
 
 
 async def download_file(channel_title, channel_id, message):
+    print(message.file)
     media_type = GetFileSuffix(message)[0]
     # 获取媒体类型
     is_photo = media_type == 'image'
