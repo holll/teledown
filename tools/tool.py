@@ -22,6 +22,7 @@ def print_all_channel(client: TelegramClient, need_type: types):
 async def getHistoryMessage(client: TelegramClient, chat_id: int, plus_func=None):
     channelData = await client.get_entity(chat_id)
     channel_title = channelData.title
+    # Todo 根据plus_func获取指定消息区间
     if plus_func is not None and plus_func[:1] == '=':
         messages = client.iter_messages(chat_id, ids=int(plus_func[1:]))
     else:

@@ -108,12 +108,16 @@ async def down_group(client: TelegramClient, chat_id, plus_func: str):
     # Todo 为了应对某些频道改名导致存储路径更新，通过chat_id预处理文件夹名称
     # 识别到存在相同id文件夹时，更新旧文件夹名称
     async for message in messages:
+        # Todo 待优化，废除can_continue
         # 0表示执行下载操作，1表示跳过消息，2表示break
         switch = tools.tool.can_continue(message.id, plus_func)
         if switch == 1:
             continue
         elif switch == 2:
             break
+        """转发消息
+        await message.forward_to('me')
+        """
         if message.media is not None:
             await download_file(channel_title, chat_id, message)
     print(channel_title, '全部下载完成')
