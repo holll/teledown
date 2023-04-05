@@ -36,9 +36,9 @@ def GetFileName(message, is_photo: bool) -> str:
 
     if len(message.message) != 0:
         sName = shorten_filename(demoji.replace(message.message, '[emoji]'))
-        return re.sub(r'[\\/:*?"<>|]', '_', sName) + '.' + message.file.ext
+        return re.sub(r'[\\/:*?"<>|]', '_', sName) + message.file.ext
 
-    return GetFileId(message) + '.' + message.file.ext
+    return GetFileId(message) + message.file.ext
 
 
 def GetFileId(message) -> str:
@@ -60,7 +60,6 @@ def GetFileSuffix(message) -> list:
 
 
 async def download_file(channel_title, channel_id, message):
-    print(message.file)
     media_type = GetFileSuffix(message)[0]
     # 获取媒体类型
     is_photo = media_type == 'image'
@@ -108,12 +107,10 @@ async def down_group(client: TelegramClient, chat_id, plus_func: str):
     # Todo 为了应对某些频道改名导致存储路径更新，通过chat_id预处理文件夹名称
     # 识别到存在相同id文件夹时，更新旧文件夹名称
     async for message in messages:
-        # 0表示执行下载操作，1表示跳过消息，2表示break
-        switch = tools.tool.can_continue(message.id, plus_func)
-        if switch == 1:
-            continue
-        elif switch == 2:
-            break
+        # Todo 待优化，废除can_continue
+        """转发消息
+        await message.forward_to('me')
+        """
         if message.media is not None:
             await download_file(channel_title, chat_id, message)
     print(channel_title, '全部下载完成')
@@ -132,11 +129,6 @@ async def print_group(client: TelegramClient, chat_id, plus_func: str):
     names = []
     sizes = []
     async for message in messages:
-        switch = tools.tool.can_continue(message.id, plus_func)
-        if switch == 1:
-            continue
-        elif switch == 2:
-            break
         if message.media is not None:
             # 获取文件类型
             is_photo = isinstance(message.media, types.MessageMediaPhoto)
