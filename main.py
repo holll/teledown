@@ -7,7 +7,7 @@ from telethon import TelegramClient
 from telethon.tl import types
 
 from tools.down_file import down_group
-from tools.tool import print_all_channel
+from tools.tool import print_all_channel,Hook
 
 config_path = './config.json'
 # 配置处理开始
@@ -59,6 +59,7 @@ if __name__ == '__main__':
         exit()
     with client.start(phone=phone, bot_token=bot_token):
         client.loop.run_until_complete(client_main())
+        client.loop.run_until_complete(Hook(client))
         plus_func = '>0'
         if len(sys.argv) == 1:
             select = input('功能选择：\n1、查看所有频道\n2、下载频道资源\n')

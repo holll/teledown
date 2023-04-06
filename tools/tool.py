@@ -1,3 +1,5 @@
+import time
+
 from telethon import TelegramClient
 from telethon.tl import types
 
@@ -40,3 +42,7 @@ async def getHistoryMessage(client: TelegramClient, chat_id: int, plus_func=None
     else:
         messages = client.iter_messages(chat_id, reverse=True)
     return channel_title, messages
+
+
+async def Hook(client: TelegramClient):
+    pass
