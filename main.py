@@ -8,6 +8,7 @@ from telethon.tl import types
 
 from tools.down_file import down_group
 from tools.tool import print_all_channel,Hook
+from tools.upload_file import upload_file
 
 config_path = './config.json'
 # 配置处理开始
@@ -62,7 +63,7 @@ if __name__ == '__main__':
         client.loop.run_until_complete(Hook(client))
         plus_func = '>0'
         if len(sys.argv) == 1:
-            select = input('功能选择：\n1、查看所有频道\n2、下载频道资源\n')
+            select = input('功能选择：\n1、查看所有频道\n2、下载频道资源\n3、上传频道资源\n')
             channel_id = None
         else:
             select = '2'
@@ -76,7 +77,11 @@ if __name__ == '__main__':
                     plus_func = sys.argv[2]
         if select == '1':
             print_all_channel(client=client, need_type=types.Channel)
-        else:
+        elif select == '2':
             if channel_id is None:
                 channel_id = input('频道id：')
             client.loop.run_until_complete(down_group(client, channel_id, plus_func))
+        elif select == '3':
+            channel_id = input('上传到：')
+            folder_path = input('文件夹路径：')
+            client.loop.run_until_complete(upload_file(client, channel_id, folder_path))

@@ -4,12 +4,9 @@ import sys
 from asyncio import CancelledError
 
 import demoji
-import pandas as pd
 from telethon import TelegramClient
-from telethon.tl import types
 
-import tools.tool
-from tools.tool import shorten_filename
+from tools.tool import GetFileName, getHistoryMessage, GetChatId
 from tools.tqdm import TqdmUpTo
 
 
@@ -27,27 +24,6 @@ def fileExist(file_path: str, file_size):
         temp = f'{fileName}({i}){fileType}'
         i += 1
     return False, temp
-
-
-def GetFileName(message, is_photo: bool) -> str:
-    # 取名优先级，文件名>描述>ID
-    if message.file.name:
-        return message.file.name
-
-    if len(message.message) != 0:
-        sName = shorten_filename(demoji.replace(message.message, '[emoji]'))
-        return re.sub(r'[\\/:*?"<>|]', '_', sName) + message.file.ext
-
-    return GetFileId(message) + message.file.ext
-
-
-def GetFileId(message) -> str:
-    _id = 'unknown'
-    if hasattr(message.media, 'document'):
-        _id = message.media.document.id
-    elif hasattr(message.media, 'photo'):
-        _id = message.media.photo.id
-    return str(_id)
 
 
 def GetFileSuffix(message) -> list:
@@ -95,12 +71,8 @@ async def download_file(channel_title, channel_id, message):
 
 
 async def down_group(client: TelegramClient, chat_id, plus_func: str):
-    # 检测chat_id是id还是昵称
-    isId = re.match(r'-?[1-9][0-9]{4,}', chat_id)
-    if isId is None:
-        entity = await client.get_entity(chat_id)
-        chat_id = entity.id
-    channel_title, messages = await tools.tool.getHistoryMessage(client, int(chat_id), plus_func)  # messages是倒序的
+    chat_id = GetChatId(client, chat_id)
+    channel_title, messages = await getHistoryMessage(client, chat_id, plus_func)  # messages是倒序的
     # 频道名称中的表情转文字，以兼容不同字符集设备
     channel_title = demoji.replace(channel_title, '[emoji]')
     channel_title = re.sub(r'[\\/:*?"<>|]', '', channel_title)
@@ -114,59 +86,3 @@ async def down_group(client: TelegramClient, chat_id, plus_func: str):
         if message.media is not None:
             await download_file(channel_title, chat_id, message)
     print(channel_title, '全部下载完成')
-
-
-async def print_group(client: TelegramClient, chat_id, plus_func: str):
-    # 检测chat_id是id还是昵称
-    isId = re.match(r'-?[1-9][0-9]{4,}', chat_id)
-    if isId is None:
-        entity = await client.get_entity(chat_id)
-        chat_id = entity.id
-    channel_title, messages = await tools.tool.getHistoryMessage(client, int(chat_id))  # messages是倒序的
-    channel_title = demoji.replace(channel_title, '[emoji]')
-    channel_title = re.sub(r'[\\/:*?"<>|]', '', channel_title)
-    links = []
-    names = []
-    sizes = []
-    async for message in messages:
-        if message.media is not None:
-            # 获取文件类型
-            is_photo = isinstance(message.media, types.MessageMediaPhoto)
-            is_doc = isinstance(message.media, types.MessageMediaDocument)
-            if not (is_photo or is_doc):
-                continue
-
-            if len(message.message) != 0:
-                message.message = demoji.replace(message.message, '[emoji]')
-            # 否则用消息id来命名
-            else:
-                if is_photo:
-                    message.message = str(message.photo.id)
-                else:
-                    message.message = str(message.document.id)
-            message.message = shorten_filename(message.message)
-            if is_photo:
-                file_type = 'jpg'
-            else:
-                file_type = message.media.document.mime_type.split('/')[-1]
-                if file_type == "quicktime":
-                    file_type = "mov"
-                if hasattr(message.media.document.attributes[-1], 'file_name'):
-                    message.message = message.media.document.attributes[-1].file_name.rsplit('.', 1)[0]
-            file_name = message.message + '.' + file_type
-            file_name = re.sub(r'[\\/:*?"<>|]', '_', file_name)
-
-            file_size = message.file.size
-            file_size = f'{round(file_size / 1024 ** 2, 2)}MB' if file_size > 1024 ** 2 else f'{round(file_size / 1024, 2)}KB'
-            link = f'https://t.me/c/{chat_id}/{message.id}'
-            links.append(link)
-            names.append(file_name)
-            sizes.append(file_size)
-
-    df = pd.DataFrame({'链接': links, '文件名': names, '大小': sizes})
-    # 去重
-    df.drop_duplicates(subset=["文件名", "大小"], keep="first", inplace=True)
-    df.sort_values("文件名", inplace=True)
-    #    df.to_csv(f'{chat_id}.csv',index=False)
-    df.to_csv(f'{os.environ["save_path"]}/{channel_title}-{chat_id}/{chat_id}.csv', index=False)
-    print(chat_id, '全部输出完成')

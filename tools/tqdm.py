@@ -9,7 +9,7 @@ class TqdmUpTo(tqdm):
 
     def update_to(self, current, total):
         """更新进度条
-        :param current: 已下载
+        :param current: 已传输
         :param total: 总大小
         :return:
         """
