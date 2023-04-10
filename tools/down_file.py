@@ -54,8 +54,7 @@ async def download_file(channel_title, channel_id, message):
         download_path = file_path + '.downloading'
         print(f"开始下载：{file_name}")
         try:
-            with TqdmUpTo(unit='B', unit_scale=True, unit_divisor=1024, total=file_size,
-                          bar_format=TqdmUpTo.bar_format, desc=file_name[:10]) as bar:
+            with TqdmUpTo(total=file_size, bar_format=TqdmUpTo.bar_format, desc=file_name[:10]) as bar:
                 await message.download_media(download_path, progress_callback=bar.update_to)
         except CancelledError:
             print("取消下载")

@@ -7,7 +7,7 @@ from telethon import TelegramClient
 from telethon.tl import types
 
 from tools.down_file import down_group
-from tools.tool import print_all_channel,Hook
+from tools.tool import print_all_channel, Hook
 from tools.upload_file import upload_file
 
 config_path = './config.json'
@@ -83,5 +83,5 @@ if __name__ == '__main__':
             client.loop.run_until_complete(down_group(client, channel_id, plus_func))
         elif select == '3':
             channel_id = input('上传到：')
-            folder_path = input('文件夹路径：')
+            folder_path = input('文件（夹）路径：')
             client.loop.run_until_complete(upload_file(client, channel_id, folder_path))
