@@ -35,7 +35,7 @@ async def getHistoryMessage(client: TelegramClient, chat_id: int, plus_func=None
             if filterFunc == '=':
                 messages = client.iter_messages(chat_id, ids=specifyID)
             elif filterFunc == '>':
-                messages = client.iter_messages(chat_id, max_id=specifyID)
+                messages = client.iter_messages(chat_id, min_id=specifyID)
             elif filterFunc == '<':
                 messages = client.iter_messages(chat_id, max_id=specifyID)
         else:
