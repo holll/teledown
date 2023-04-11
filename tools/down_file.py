@@ -70,7 +70,7 @@ async def download_file(channel_title, channel_id, message):
 
 
 async def down_group(client: TelegramClient, chat_id, plus_func: str):
-    chat_id = GetChatId(client, chat_id)
+    chat_id = await GetChatId(client, chat_id)
     channel_title, messages = await getHistoryMessage(client, chat_id, plus_func)  # messages是倒序的
     # 频道名称中的表情转文字，以兼容不同字符集设备
     channel_title = demoji.replace(channel_title, '[emoji]')
