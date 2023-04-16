@@ -73,7 +73,7 @@ async def down_group(client: TelegramClient, chat_id, plus_func: str):
     chat_id = await GetChatId(client, chat_id)
     channel_title, messages = await getHistoryMessage(client, chat_id, plus_func)  # messages是倒序的
     # 频道名称中的表情转文字，以兼容不同字符集设备
-    channel_title = demoji.replace(channel_title, '[emoji]')
+    channel_title = demoji.replace(channel_title, '')
     channel_title = re.sub(r'[\\/:*?"<>|]', '', channel_title)
     # Todo 为了应对某些频道改名导致存储路径更新，通过chat_id预处理文件夹名称
     # 识别到存在相同id文件夹时，更新旧文件夹名称

@@ -15,12 +15,21 @@ def shorten_filename(filename, limit=50):
         return filename[:int(limit / 2) - 3] + '...' + filename[len(filename) - int(limit / 2):]
 
 
-def print_all_channel(client: TelegramClient, need_type: types):
+def print_all_channel(client: TelegramClient):
+    Ids = []
+    Names = []
+    # Types = []
     for d in client.iter_dialogs():
-        channelId = d.entity.id
-        channelName = d.name
-        if isinstance(d.entity, need_type):
-            print(d.entity.title, d.entity.id)
+        if not isinstance(d.entity, types.Channel):
+            continue
+        Ids.append(d.entity.id)
+        Names.append(d.name)
+        # Types.append(d.entity)
+
+    df = pd.DataFrame({'ID': Ids, '频道名': Names})
+    df.sort_values("频道名", inplace=True)
+    df.to_csv('全部频道.csv', index=False)
+    print('全部输出完成')
 
 
 async def getHistoryMessage(client: TelegramClient, chat_id: int, plus_func=None):
@@ -112,8 +121,8 @@ async def print_group(client: TelegramClient, chat_id):
     df = pd.DataFrame({'链接': links, '文件名': names, '描述': submits, '大小': sizes})
     # 去重
     df.drop_duplicates(subset=["文件名", "大小"], keep="first", inplace=True)
-    df.sort_values("文件名", inplace=True)
-    df.to_csv(f'{chat_id}.csv', index=False)
+    df.sort_values("链接", inplace=True, ascending=False)
+    df.to_csv(f'{channel_title}-{chat_id}.csv', index=False)
     # df.to_csv(f'{os.environ["save_path"]}/{channel_title}-{chat_id}/{chat_id}.csv', index=False)
     print(chat_id, '全部输出完成')
 
