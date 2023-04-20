@@ -148,9 +148,10 @@ def initDb():
             print("数据库文件被占用，释放中")
             # 查询文件占用情况
             p1 = subprocess.Popen(["lsof", "-t", file_path], stdout=subprocess.PIPE)
-            print(["kill", "-9", str(p1.communicate()[0].strip())])
-            # 将 stdout 的结果（即进程 ID）作为参数传递给 kill 命令
-            p2 = subprocess.Popen(["kill", "-9", str(p1.communicate()[0].strip())], shell=True)
+            # 读取子进程的 stdout 输出并等待子进程结束
+            stdout, _ = p1.communicate()
+            # 将 stdout 的结果（即进程 ID）作为参数传递给 kill 命令，结束该进程
+            p2 = subprocess.Popen(["kill", "-9", stdout.strip().decode()])
             p2.wait(timeout=5)
     else:
         return
