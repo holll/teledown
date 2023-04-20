@@ -146,9 +146,9 @@ def initDb():
         # lsof 命令返回非零值表示文件被占用
         if p1.returncode == 0:
             print("数据库文件被占用，释放中")
-            # kill 命令终止占用文件的进程
-            p2 = subprocess.Popen(["kill", "$(lsof -t " + file_path + ")"])
-            p2.wait()
+            # 将 stdout 的结果（即进程 ID）作为参数传递给 kill 命令
+            p2 = subprocess.Popen(["kill", str(p1.communicate()[0].strip())], shell=True)
+            p2.wait(timeout=5)
     else:
         return
 
