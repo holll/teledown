@@ -7,7 +7,7 @@ from telethon import TelegramClient
 from telethon.tl import types
 
 from tools.down_file import down_group
-from tools.tool import print_all_channel, Hook, print_group
+from tools.tool import print_all_channel, Hook, print_group, initDb
 from tools.upload_file import upload_file
 
 config_path = './config.json'
@@ -53,6 +53,7 @@ async def client_main():
 
 
 if __name__ == '__main__':
+    initDb()
     phone = config.get('phone')
     bot_token = config.get('bot_token')
     if phone is not None and bot_token is not None:

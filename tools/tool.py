@@ -1,4 +1,7 @@
+import os
 import re
+import subprocess
+import sys
 
 import demoji
 import pandas as pd
@@ -125,6 +128,29 @@ async def print_group(client: TelegramClient, chat_id):
     df.to_csv(f'{channel_title}-{chat_id}.csv', index=False)
     # df.to_csv(f'{os.environ["save_path"]}/{channel_title}-{chat_id}/{chat_id}.csv', index=False)
     print(chat_id, '全部输出完成')
+
+
+# 确保数据库没有被占用
+def initDb():
+    # 获取当前 Python 文件所在的目录路径
+    current_dir_path = os.path.dirname(os.path.abspath(__file__))
+    # 获取项目根目录的路径
+    root_dir_path = os.path.join(current_dir_path, "..")
+    root_abspath = os.path.abspath(root_dir_path)
+    if sys.platform == 'linux':
+        # 检测的文件路径
+        file_path = os.path.join(root_abspath, "python.session")
+        # 查询文件占用情况
+        p1 = subprocess.Popen(["lsof", file_path], stdout=subprocess.PIPE)
+        output, _ = p1.communicate()
+        # lsof 命令返回非零值表示文件被占用
+        if p1.returncode == 0:
+            print("数据库文件被占用，释放中")
+            # kill 命令终止占用文件的进程
+            p2 = subprocess.Popen(["kill", "$(lsof -t " + file_path + ")"])
+            p2.wait()
+    else:
+        return
 
 
 async def Hook(client: TelegramClient):
