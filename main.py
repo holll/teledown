@@ -4,12 +4,12 @@ import sys
 
 import socks
 from telethon import TelegramClient
-from telethon.tl import types
 
 from tools.down_file import down_group
 from tools.tool import print_all_channel, Hook, print_group, initDb
 from tools.upload_file import upload_file
 
+initDb()
 config_path = './config.json'
 # 配置处理开始
 # These example values won't work. You must get your own api_id and
@@ -53,7 +53,6 @@ async def client_main():
 
 
 if __name__ == '__main__':
-    initDb()
     phone = config.get('phone')
     bot_token = config.get('bot_token')
     if phone is not None and bot_token is not None:
@@ -88,4 +87,4 @@ if __name__ == '__main__':
             client.loop.run_until_complete(upload_file(client, channel_id, folder_path))
         elif select == '4':
             chat_id = input('请输入频道id:')
-            client.loop.run_until_complete(print_group(client,chat_id))
+            client.loop.run_until_complete(print_group(client, chat_id))
