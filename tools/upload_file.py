@@ -4,6 +4,7 @@ from asyncio import CancelledError
 
 from telethon import TelegramClient
 
+from tools.tool import get_all_files
 from tools.tqdm import TqdmUpTo
 
 
@@ -13,10 +14,7 @@ async def upload_file(client: TelegramClient, chat_id, path: str):
     if os.path.isfile(path):
         path_list.append(path)
     else:
-        for filename in os.listdir(path):
-            file_path = os.path.join(path, filename)
-            if os.path.isfile(file_path):
-                path_list.append(file_path)
+        path_list = get_all_files(path)
     # 遍历文件夹下的所有文件
     for file_path in path_list:
         # 文件预处理，解析信息

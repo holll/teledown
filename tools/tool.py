@@ -157,6 +157,16 @@ def initDb():
         return
 
 
+def get_all_files(path):
+    all_files = []
+    for root, dirs, files in os.walk(path):
+        for filename in files:
+            # 获取文件的绝对路径
+            filepath = os.path.join(root, filename)
+            all_files.append(filepath)
+    return all_files
+
+
 async def Hook(client: TelegramClient):
     # 打开文本文件并读取所有行
     # with open('./unique_data.txt', 'r') as f:
