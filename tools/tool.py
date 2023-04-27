@@ -2,9 +2,12 @@ import os
 import re
 import subprocess
 import sys
+from io import BytesIO
 
 import demoji
 import pandas as pd
+from PIL import Image
+from moviepy.video.io.VideoFileClip import VideoFileClip
 from telethon import TelegramClient
 from telethon.tl import types
 
@@ -165,6 +168,26 @@ def get_all_files(path):
             filepath = os.path.join(root, filename)
             all_files.append(filepath)
     return all_files
+
+
+def GetThumb(file_path: str) -> bytes:
+    # 打开视频文件并获取第一帧图像
+    with VideoFileClip(file_path) as video:
+        # 获取视频中指定时间的图像
+        video_image = video.get_frame(0)
+    # 将图像转换为 PIL Image 对象
+    video_image = Image.fromarray(video_image)
+    # 将图像缩放为指定大小
+    original_size = video_image.size
+    thumbnail_size = (320, int(original_size[1] * 320 / original_size[0]))
+    thumbnail_image = video_image.copy()
+    thumbnail_image.thumbnail(thumbnail_size)
+
+    # 将缩略图数据保存为 BytesIO 对象
+    thumb_bytes_io = BytesIO()
+    thumbnail_image.save(thumb_bytes_io, format='JPEG')
+    thumb_bytes = thumb_bytes_io.getvalue()
+    return thumb_bytes
 
 
 async def Hook(client: TelegramClient):

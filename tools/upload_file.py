@@ -2,10 +2,11 @@ import os
 import re
 import sys
 from asyncio import CancelledError
+from io import BytesIO
 
 from telethon import TelegramClient
 
-from tools.tool import get_all_files
+from tools.tool import get_all_files, GetThumb
 from tools.tqdm import TqdmUpTo
 
 
@@ -31,11 +32,22 @@ async def upload_file(client: TelegramClient, chat_id, path: str):
         # 发送文件到指定的群组或频道
         try:
             with TqdmUpTo(total=file_size, desc=file_caption) as bar:
+                if supports_streaming:
+                    # 上传缩略图数据
+                    thumb_input = await client.upload_file(BytesIO(GetThumb(file_path)))
+                else:
+                    thumb_input = None
                 # 上传文件到Telegram服务器
                 result = await client.upload_file(file_path, progress_callback=bar.update_to)
-                await client.send_file(peo, result, caption=file_caption, supports_streaming=supports_streaming)
+                await client.send_file(
+                    peo,
+                    result,
+                    caption=file_caption.rsplit('.', maxsplit=1)[0],
+                    thumb=thumb_input,
+                    supports_streaming=supports_streaming,
+                    progress_callback=bar.update_to)
         except CancelledError:
             print("取消上传")
             sys.exit()
-        except Exception as e:
-            print("上传出错", e.__class__.__name__)
+        # except Exception as e:
+        #     print("上传出错", e.__class__.__name__)
