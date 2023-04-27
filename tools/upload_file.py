@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 from asyncio import CancelledError
 
@@ -9,6 +10,9 @@ from tools.tqdm import TqdmUpTo
 
 
 async def upload_file(client: TelegramClient, chat_id, path: str):
+    isId = re.match(r'-?[1-9][0-9]{4,}', chat_id)
+    if isId:
+        chat_id = int(chat_id)
     peo = await client.get_entity(chat_id)
     path_list = []
     if os.path.isfile(path):
