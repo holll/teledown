@@ -5,6 +5,7 @@ from asyncio import CancelledError
 
 import demoji
 from telethon import TelegramClient
+from telethon.errors import FileReferenceExpiredError
 
 from tools.tool import GetFileName, getHistoryMessage, GetChatId
 from tools.tqdm import TqdmUpTo
@@ -35,7 +36,7 @@ def GetFileSuffix(message) -> list:
     return mime_type.split('/')
 
 
-async def download_file(channel_title, channel_id, message):
+async def download_file(client: TelegramClient, channel_title, channel_id, message, old=False):
     media_type = GetFileSuffix(message)[0]
     # 获取媒体类型
     is_photo = media_type == 'image'
@@ -60,6 +61,15 @@ async def download_file(channel_title, channel_id, message):
             print("取消下载")
             os.remove(download_path)
             sys.exit()
+        except FileReferenceExpiredError:
+            if old:
+                print('重试失败，退出下载')
+                exit(1)
+            print('下载超时，重试中')
+            channelData = await client.get_entity(int(channel_id))
+            newMessages = client.iter_messages(entity=channelData, ids=message.id)
+            async for newMessage in newMessages:
+                await download_file(client, channel_title, channel_id, newMessage, old=True)
         except Exception as e:
             print("下载出错", e.__class__.__name__)
             os.remove(download_path)
@@ -83,5 +93,5 @@ async def down_group(client: TelegramClient, chat_id, plus_func: str):
         await message.forward_to('me')
         """
         if message.media is not None:
-            await download_file(channel_title, chat_id, message)
+            await download_file(client, channel_title, chat_id, message)
     print(channel_title, '全部下载完成')
