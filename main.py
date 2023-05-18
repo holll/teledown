@@ -6,6 +6,7 @@ import socks
 from telethon import TelegramClient
 
 from tools.down_file import down_group
+from tools.monit import StartMonit
 from tools.tool import print_all_channel, Hook, print_group, initDb
 from tools.upload_file import upload_file
 
@@ -63,7 +64,7 @@ if __name__ == '__main__':
         client.loop.run_until_complete(Hook(client))
         plus_func = '>0'
         if len(sys.argv) == 1:
-            select = input('功能选择：\n1、查看所有频道\n2、下载频道资源\n3、上传频道资源\n4、查看频道资源\n')
+            select = input('功能选择：\n1、查看所有频道\n2、下载频道资源\n3、上传频道资源\n4、查看频道资源\n5、监控模式\n')
             channel_id = None
         else:
             select = '2'
@@ -88,3 +89,7 @@ if __name__ == '__main__':
         elif select == '4':
             chat_id = input('请输入频道id:')
             client.loop.run_until_complete(print_group(client, chat_id))
+        elif select == '5':
+            channel_ids = input('请输入需要监控的频道(以,分割):\n').split(',')
+            client.loop.run_until_complete(StartMonit(client, channel_ids))
+            client.run_until_disconnected()

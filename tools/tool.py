@@ -39,8 +39,7 @@ def print_all_channel(client: TelegramClient):
 
 
 async def getHistoryMessage(client: TelegramClient, chat_id: int, plus_func=None):
-    channelData = await client.get_entity(chat_id)
-    channel_title = channelData.title
+    channel_title = await GetChatTitle(client, chat_id)
     messages = None
     # Todo 根据plus_func获取指定消息区间
     if plus_func is not None:
@@ -70,6 +69,13 @@ async def GetChatId(client: TelegramClient, chat_id: str) -> int:
     else:
         chat_id = int(chat_id)
     return chat_id
+
+
+async def GetChatTitle(client: TelegramClient, chat_id: int) -> str:
+    channelData = await client.get_entity(chat_id)
+    channel_title = channelData.title
+    channel_title = re.sub(r'[\\/:*?"<>|]', '', demoji.replace(channel_title, ''))
+    return channel_title
 
 
 def GetFileId(message) -> str:

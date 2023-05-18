@@ -2,6 +2,7 @@ import os
 import re
 import sys
 from asyncio import CancelledError
+from datetime import datetime
 
 import demoji
 from telethon import TelegramClient
@@ -43,11 +44,15 @@ async def download_file(client: TelegramClient, channel_title, channel_id, messa
     is_video = media_type == 'video'
     is_audio = media_type == 'audio'
 
+    message_time = message.date
+    formatted_time = datetime.strftime(message_time, '%Y_%m')
+
     # 如果不是文件就放弃（可能是音频文字啥的）
     if not (is_photo or is_video or is_audio):
         return
     file_name = GetFileName(message, is_photo)
     file_path = f'{os.environ["save_path"]}/{channel_title}-{channel_id}/{file_name}'
+    new_file_path = f'{os.environ["save_path"]}/{channel_title}-{channel_id}/{formatted_time}/{file_name}'
     file_size = message.file.size
     ret, file_path = fileExist(file_path, file_size)
     if not ret:
@@ -82,13 +87,7 @@ async def download_file(client: TelegramClient, channel_title, channel_id, messa
 async def down_group(client: TelegramClient, chat_id, plus_func: str):
     chat_id = await GetChatId(client, chat_id)
     channel_title, messages = await getHistoryMessage(client, chat_id, plus_func)  # messages是倒序的
-    # 频道名称中的表情转文字，以兼容不同字符集设备
-    channel_title = demoji.replace(channel_title, '')
-    channel_title = re.sub(r'[\\/:*?"<>|]', '', channel_title)
-    # Todo 为了应对某些频道改名导致存储路径更新，通过chat_id预处理文件夹名称
-    # 识别到存在相同id文件夹时，更新旧文件夹名称
     async for message in messages:
-        # Todo 待优化，废除can_continue
         """转发消息
         await message.forward_to('me')
         """
