@@ -4,7 +4,9 @@ import sys
 from asyncio import CancelledError
 from io import BytesIO
 
+from moviepy.editor import VideoFileClip
 from telethon import TelegramClient
+from telethon.tl.types import DocumentAttributeVideo
 
 from tools.tool import get_all_files, GetThumb
 from tools.tqdm import TqdmUpTo
@@ -37,6 +39,19 @@ async def upload_file(client: TelegramClient, chat_id, path: str):
                     thumb_input = await client.upload_file(BytesIO(GetThumb(file_path)))
                 else:
                     thumb_input = None
+                # 获取视频文件的时长
+                video_duration = int(VideoFileClip(file_path).duration)
+                # 获取视频文件的宽度和高度
+                video_clip = VideoFileClip(file_path)
+                video_width, video_height = video_clip.size
+                # 创建包含视频元数据的 DocumentAttributeVideo 对象
+                video_attr = DocumentAttributeVideo(
+                    duration=video_duration,  # 视频时长
+                    w=video_width,  # 视频宽度
+                    h=video_height,  # 视频高度
+                    round_message=False
+                )
+
                 # 上传文件到Telegram服务器
                 result = await client.upload_file(file_path, progress_callback=bar.update_to)
                 await client.send_file(
@@ -45,7 +60,8 @@ async def upload_file(client: TelegramClient, chat_id, path: str):
                     caption=file_caption.rsplit('.', maxsplit=1)[0],
                     thumb=thumb_input,
                     supports_streaming=supports_streaming,
-                    progress_callback=bar.update_to)
+                    progress_callback=bar.update_to,
+                    attributes=[video_attr])
         except CancelledError:
             print("取消上传")
             sys.exit()
