@@ -10,7 +10,6 @@ from tools.monit import StartMonit
 from tools.tool import print_all_channel, Hook, print_group, initDb, md5
 from tools.upload_file import upload_file
 
-initDb()
 config_path = './config.json'
 # 配置处理开始
 # These example values won't work. You must get your own api_id and
@@ -28,6 +27,7 @@ if phone:
     md5Token = md5(phone)
 else:
     md5Token = md5(bot_token)
+initDb(md5Token)
 os.environ['save_path'] = save_path = config.get('save_path')
 proxy_ip = config.get('proxy_ip')
 proxy_port = config.get('proxy_port')

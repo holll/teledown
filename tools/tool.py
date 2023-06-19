@@ -141,7 +141,7 @@ async def print_group(client: TelegramClient, chat_id):
 
 
 # 确保数据库没有被占用
-def initDb():
+def initDb(md5Token):
     # 获取当前 Python 文件所在的目录路径
     current_dir_path = os.path.dirname(os.path.abspath(__file__))
     # 获取项目根目录的路径
@@ -149,7 +149,7 @@ def initDb():
     root_abspath = os.path.abspath(root_dir_path)
     if sys.platform == 'linux':
         # 检测的文件路径
-        file_path = os.path.join(root_abspath, "python.session")
+        file_path = os.path.join(root_abspath, f"{md5Token}.session")
         # 查询文件占用情况
         p1 = subprocess.Popen(["lsof", file_path], stdout=subprocess.PIPE)
         output, _ = p1.communicate()
