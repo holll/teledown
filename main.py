@@ -7,7 +7,7 @@ from telethon import TelegramClient
 
 from tools.down_file import down_group
 from tools.monit import StartMonit
-from tools.tool import print_all_channel, Hook, print_group, initDb
+from tools.tool import print_all_channel, Hook, print_group, initDb, md5
 from tools.upload_file import upload_file
 
 initDb()
@@ -19,15 +19,24 @@ with open(config_path, 'r', encoding='utf-8') as f:
     config = json.load(f)
 api_id = config.get('api_id')
 api_hash = config.get('api_hash')
+phone = config.get('phone')
+bot_token = config.get('bot_token')
+if (phone is not None and bot_token is not None) or (phone is None and bot_token is None):
+    print('请确认使用机器人登录还是电话号码登录')
+    exit()
+if phone:
+    md5Token = md5(phone)
+else:
+    md5Token = md5(bot_token)
 os.environ['save_path'] = save_path = config.get('save_path')
 proxy_ip = config.get('proxy_ip')
 proxy_port = config.get('proxy_port')
 if proxy_port is not None:
     if proxy_ip is None:
         proxy_ip = '127.0.0.1'
-    client = TelegramClient('python', api_id, api_hash, proxy=(socks.SOCKS5, proxy_ip, proxy_port))
+    client = TelegramClient(md5Token, api_id, api_hash, proxy=(socks.SOCKS5, proxy_ip, proxy_port))
 else:
-    client = TelegramClient('python', api_id, api_hash)
+    client = TelegramClient(md5Token, api_id, api_hash)
 # 配置处理结束
 
 
@@ -54,11 +63,6 @@ async def client_main():
 
 
 if __name__ == '__main__':
-    phone = config.get('phone')
-    bot_token = config.get('bot_token')
-    if phone is not None and bot_token is not None:
-        print('请确认使用机器人登录还是电话号码登录')
-        exit()
     with client.start(phone=phone, bot_token=bot_token):
         client.loop.run_until_complete(client_main())
         client.loop.run_until_complete(Hook(client))
