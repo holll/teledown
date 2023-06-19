@@ -1,3 +1,4 @@
+import hashlib
 import os
 import re
 import subprocess
@@ -194,6 +195,12 @@ def GetThumb(file_path: str) -> bytes:
     thumbnail_image.save(thumb_bytes_io, format='JPEG')
     thumb_bytes = thumb_bytes_io.getvalue()
     return thumb_bytes
+
+
+def md5(string):
+    m = hashlib.md5()
+    m.update(string.encode('utf-8'))
+    return m.hexdigest()
 
 
 async def Hook(client: TelegramClient):
