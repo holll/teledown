@@ -88,7 +88,7 @@ def GetFileId(message) -> str:
     return str(_id)
 
 
-def GetFileName(message, is_photo: bool) -> str:
+def GetFileName(message) -> str:
     # 取名优先级，文件名>描述>ID
     if message.file.name:
         return message.file.name
@@ -121,7 +121,7 @@ async def print_group(client: TelegramClient, chat_id):
             if not (is_photo or is_doc):
                 continue
 
-            file_name = GetFileName(message, is_photo)
+            file_name = GetFileName(message)
 
             file_size = message.file.size
             file_size = f'{round(file_size / 1024 ** 2, 2)}MB' if file_size > 1024 ** 2 else f'{round(file_size / 1024, 2)}KB'
@@ -204,14 +204,4 @@ def md5(string):
 
 
 async def Hook(client: TelegramClient):
-    # 打开文本文件并读取所有行
-    # with open('./unique_data.txt', 'r') as f:
-    #     lines = f.readlines()
-    # peo = await client.get_entity('mihayoudt_bot')
-    # i = 0
-    # for line in lines:
-    #     i += 1
-    #     print('\r', f'正在查询{line.strip()},进度{i}/{len(lines)}', end='', flush=True)
-    #     await client.send_message(peo, line.strip())
-    #     time.sleep(70)
     pass

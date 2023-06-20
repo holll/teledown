@@ -50,7 +50,7 @@ async def download_file(client: TelegramClient, channel_title, channel_id, messa
     # 如果不是文件就放弃（可能是音频文字啥的）
     if not (is_photo or is_video or is_audio):
         return
-    file_name = GetFileName(message, is_photo)
+    file_name = GetFileName(message)
     file_path = f'{os.environ["save_path"]}/{channel_title}-{channel_id}/{file_name}'
     new_file_path = f'{os.environ["save_path"]}/{channel_title}-{channel_id}/{formatted_time}/{file_name}'
     file_size = message.file.size
