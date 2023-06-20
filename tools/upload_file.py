@@ -12,7 +12,7 @@ from tools.tool import get_all_files, GetThumb
 from tools.tqdm import TqdmUpTo
 
 
-async def upload_file(client: TelegramClient, chat_id, path: str):
+async def upload_file(client: TelegramClient, chat_id, path: str, del_after_upload: bool):
     isId = re.match(r'-?[1-9][0-9]{4,}', chat_id)
     if isId:
         chat_id = int(chat_id)
@@ -27,6 +27,9 @@ async def upload_file(client: TelegramClient, chat_id, path: str):
         path_list = get_all_files(path)
     # 遍历文件夹下的所有文件
     for file_path in path_list:
+        # 如果文件不存在，跳过上传（防呆处理）
+        if not os.path.exists(file_path):
+            continue
         # 文件预处理，解析信息
         file_caption = os.path.basename(file_path)
         file_size = os.path.getsize(file_path)
@@ -58,6 +61,8 @@ async def upload_file(client: TelegramClient, chat_id, path: str):
                     thumb=thumb_input,
                     progress_callback=bar.update_to,
                     attributes=[video_attr])
+                if del_after_upload:
+                    os.remove(file_path)
         except CancelledError:
             print("取消上传")
             sys.exit()

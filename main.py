@@ -89,7 +89,17 @@ if __name__ == '__main__':
         elif select == '3':
             channel_id = input('上传到：')
             folder_path = input('文件（夹）路径：')
-            client.loop.run_until_complete(upload_file(client, channel_id, folder_path))
+            while True:
+                del_after_upload = input('上传后删除原文件(Y/N)：').upper()
+                if del_after_upload == 'Y':
+                    del_after_upload = True
+                    break
+                elif del_after_upload == 'N':
+                    del_after_upload = False
+                    break
+                else:
+                    print("无效的输入，请重新输入")
+            client.loop.run_until_complete(upload_file(client, channel_id, folder_path,del_after_upload))
         elif select == '4':
             chat_id = input('请输入频道id:')
             client.loop.run_until_complete(print_group(client, chat_id))
