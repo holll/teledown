@@ -53,7 +53,11 @@ async def upload_file(client: TelegramClient, chat_id, path: str, del_after_uplo
                 )
 
                 # 上传文件到Telegram服务器
-                result = await client.upload_file(file_path, progress_callback=bar.update_to)
+                try:
+                    result = await client.upload_file(file_path, progress_callback=bar.update_to)
+                except RuntimeError:
+                    print(f'上传出错，跳过{file_caption}')
+                    continue
                 await client.send_file(
                     peo,
                     result,
