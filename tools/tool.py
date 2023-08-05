@@ -57,7 +57,7 @@ async def getHistoryMessage(client: TelegramClient, chat_id: int, plus_func=None
             tmpId = plus_func[1:].split('s')
             messages = client.iter_messages(chat_id, max_id=int(tmpId[-1]), min_id=int(tmpId[0]))
     else:
-        messages = client.iter_messages(chat_id, reverse=True)
+        messages = client.iter_messages(chat_id, reverse=True, min_id=1)
     return channel_title, messages
 
 
@@ -106,7 +106,7 @@ async def print_group(client: TelegramClient, chat_id):
     if isId is None:
         entity = await client.get_entity(chat_id)
         chat_id = entity.id
-    channel_title, messages = await getHistoryMessage(client, int(chat_id))  # messages是倒序的
+    channel_title, messages = await getHistoryMessage(client=client, chat_id=int(chat_id))  # messages是倒序的
     channel_title = demoji.replace(channel_title, '[emoji]')
     channel_title = re.sub(r'[\\/:*?"<>|]', '', channel_title)
     links = []
@@ -204,4 +204,27 @@ def md5(string):
 
 
 async def Hook(client: TelegramClient):
-    pass
+    return
+    channel_title, messages = await getHistoryMessage(client, 1318204623)
+    # 统计每个人的发言次数
+    count_say = {}
+    async for message in messages:
+        if message.from_id is not None:
+            count_say[message.from_id.user_id] = count_say.get(message.from_id.user_id, 0) + 1
+    user_say = {}
+    for user_id in count_say.keys():
+        people = await client.get_entity(user_id)
+        user_say[people.username] = count_say[user_id]
+    print(user_say)
+
+    # async for message in client.iter_messages('@chengguangjiepai', ):
+    #     if message.media is not None:
+    #         file_name = GetFileName(message)
+    #         file_path = f'{os.environ["save_path"]}/1-1/{file_name}'
+    #         file_size = message.file.size
+    #         print(f"开始下载：{file_name}")
+    #         with TqdmUpTo(total=file_size, bar_format=TqdmUpTo.bar_format, desc=file_name[:10]) as bar:
+    #             await message.download_media(file_path, progress_callback=bar.update_to)
+
+
+pass
