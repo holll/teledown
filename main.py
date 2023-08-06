@@ -99,7 +99,7 @@ if __name__ == '__main__':
                 plus_func = args.range
             client.loop.run_until_complete(down_group(client, channel_id, plus_func))
         elif args.upload:
-            del_after_upload = True if args.dau.upper == 'Y' else False
+            del_after_upload = True if args.dau.upper() == 'Y' else False
             client.loop.run_until_complete(upload_file(client, args.id, args.path, del_after_upload))
         elif args.print:
             client.loop.run_until_complete(print_group(client, args.id))
