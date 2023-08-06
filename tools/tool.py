@@ -1,3 +1,4 @@
+import hashlib
 import os
 import re
 import subprocess
@@ -39,8 +40,7 @@ def print_all_channel(client: TelegramClient):
 
 
 async def getHistoryMessage(client: TelegramClient, chat_id: int, plus_func=None):
-    channelData = await client.get_entity(chat_id)
-    channel_title = channelData.title
+    channel_title = await GetChatTitle(client, chat_id)
     messages = None
     # Todo 根据plus_func获取指定消息区间
     if plus_func is not None:
@@ -57,7 +57,7 @@ async def getHistoryMessage(client: TelegramClient, chat_id: int, plus_func=None
             tmpId = plus_func[1:].split('s')
             messages = client.iter_messages(chat_id, max_id=int(tmpId[-1]), min_id=int(tmpId[0]))
     else:
-        messages = client.iter_messages(chat_id, reverse=True)
+        messages = client.iter_messages(chat_id, reverse=True, min_id=1)
     return channel_title, messages
 
 
@@ -72,6 +72,13 @@ async def GetChatId(client: TelegramClient, chat_id: str) -> int:
     return chat_id
 
 
+async def GetChatTitle(client: TelegramClient, chat_id: int) -> str:
+    channelData = await client.get_entity(chat_id)
+    channel_title = channelData.title
+    channel_title = re.sub(r'[\\/:*?"<>|]', '', demoji.replace(channel_title, ''))
+    return channel_title
+
+
 def GetFileId(message) -> str:
     _id = 'unknown'
     if hasattr(message.media, 'document'):
@@ -81,7 +88,7 @@ def GetFileId(message) -> str:
     return str(_id)
 
 
-def GetFileName(message, is_photo: bool) -> str:
+def GetFileName(message) -> str:
     # 取名优先级，文件名>描述>ID
     if message.file.name:
         return message.file.name
@@ -99,7 +106,7 @@ async def print_group(client: TelegramClient, chat_id):
     if isId is None:
         entity = await client.get_entity(chat_id)
         chat_id = entity.id
-    channel_title, messages = await getHistoryMessage(client, int(chat_id))  # messages是倒序的
+    channel_title, messages = await getHistoryMessage(client=client, chat_id=int(chat_id))  # messages是倒序的
     channel_title = demoji.replace(channel_title, '[emoji]')
     channel_title = re.sub(r'[\\/:*?"<>|]', '', channel_title)
     links = []
@@ -114,7 +121,7 @@ async def print_group(client: TelegramClient, chat_id):
             if not (is_photo or is_doc):
                 continue
 
-            file_name = GetFileName(message, is_photo)
+            file_name = GetFileName(message)
 
             file_size = message.file.size
             file_size = f'{round(file_size / 1024 ** 2, 2)}MB' if file_size > 1024 ** 2 else f'{round(file_size / 1024, 2)}KB'
@@ -134,7 +141,7 @@ async def print_group(client: TelegramClient, chat_id):
 
 
 # 确保数据库没有被占用
-def initDb():
+def initDb(md5Token):
     # 获取当前 Python 文件所在的目录路径
     current_dir_path = os.path.dirname(os.path.abspath(__file__))
     # 获取项目根目录的路径
@@ -142,7 +149,7 @@ def initDb():
     root_abspath = os.path.abspath(root_dir_path)
     if sys.platform == 'linux':
         # 检测的文件路径
-        file_path = os.path.join(root_abspath, "python.session")
+        file_path = os.path.join(root_abspath, f"{md5Token}.session")
         # 查询文件占用情况
         p1 = subprocess.Popen(["lsof", file_path], stdout=subprocess.PIPE)
         output, _ = p1.communicate()
@@ -190,15 +197,34 @@ def GetThumb(file_path: str) -> bytes:
     return thumb_bytes
 
 
+def md5(string):
+    m = hashlib.md5()
+    m.update(string.encode('utf-8'))
+    return m.hexdigest()
+
+
 async def Hook(client: TelegramClient):
-    # 打开文本文件并读取所有行
-    # with open('./unique_data.txt', 'r') as f:
-    #     lines = f.readlines()
-    # peo = await client.get_entity('mihayoudt_bot')
-    # i = 0
-    # for line in lines:
-    #     i += 1
-    #     print('\r', f'正在查询{line.strip()},进度{i}/{len(lines)}', end='', flush=True)
-    #     await client.send_message(peo, line.strip())
-    #     time.sleep(70)
-    pass
+    return
+    channel_title, messages = await getHistoryMessage(client, 1318204623)
+    # 统计每个人的发言次数
+    count_say = {}
+    async for message in messages:
+        if message.from_id is not None:
+            count_say[message.from_id.user_id] = count_say.get(message.from_id.user_id, 0) + 1
+    user_say = {}
+    for user_id in count_say.keys():
+        people = await client.get_entity(user_id)
+        user_say[people.username] = count_say[user_id]
+    print(user_say)
+
+    # async for message in client.iter_messages('@chengguangjiepai', ):
+    #     if message.media is not None:
+    #         file_name = GetFileName(message)
+    #         file_path = f'{os.environ["save_path"]}/1-1/{file_name}'
+    #         file_size = message.file.size
+    #         print(f"开始下载：{file_name}")
+    #         with TqdmUpTo(total=file_size, bar_format=TqdmUpTo.bar_format, desc=file_name[:10]) as bar:
+    #             await message.download_media(file_path, progress_callback=bar.update_to)
+
+
+pass
