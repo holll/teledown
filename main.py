@@ -13,8 +13,6 @@ from tools.upload_file import upload_file
 
 config_path = './config.json'
 # 配置处理开始
-# These example values won't work. You must get your own api_id and
-# api_hash from https://my.telegram.org, under API Development.
 with open(config_path, 'r', encoding='utf-8') as f:
     config = json.load(f)
 api_id = config.get('api_id')

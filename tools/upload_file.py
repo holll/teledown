@@ -6,7 +6,7 @@ from io import BytesIO
 
 from moviepy.editor import VideoFileClip
 from telethon import TelegramClient
-from telethon.tl.types import DocumentAttributeVideo
+from telethon.tl.types import DocumentAttributeVideo, PeerChannel
 
 from tools.tool import get_all_files, GetThumb
 from tools.tqdm import TqdmUpTo
@@ -17,7 +17,10 @@ async def upload_file(client: TelegramClient, chat_id, path: str, del_after_uplo
     if isId:
         chat_id = int(chat_id)
     if chat_id != 'me':
-        peo = await client.get_entity(chat_id)
+        if client.is_bot():
+            peo = await client.get_entity(PeerChannel(chat_id))
+        else:
+            peo = await client.get_entity(chat_id)
     else:
         peo = 'me'
     path_list = []
