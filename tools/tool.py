@@ -150,7 +150,9 @@ def initDb(md5Token):
     if sys.platform == 'linux':
         # 检测的文件路径
         file_path = os.path.join(root_abspath, f"{md5Token}.session")
-        # 查询文件占用情况
+        if not os.path.exists(file_path):
+            return
+            # 查询文件占用情况
         p1 = subprocess.Popen(["lsof", file_path], stdout=subprocess.PIPE)
         output, _ = p1.communicate()
         # lsof 命令返回非零值表示文件被占用
