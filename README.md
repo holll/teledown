@@ -36,3 +36,13 @@ https://www.jianshu.com/p/3d047c7516cf
 2. `Server sent a very new message with ID xxxxxxxxxxxxxxxxxxx, ignoring`，这个问题是由于当前设备时间与telegram服务器时间差距过大（大于30s）。
 解决办法：服务器时间戳是`xxxxxxxxxxxxxxxxxxx >> 32`，请将本地时间戳修改到与服务器时间戳相差30s以内
 3. `Could not find the input entity for PeerUser`，参见注意事项第一点
+
+## Star历史
+
+<a href="https://github.com/holll/teledown/stargazers">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=holll/teledown&type=Date&theme=dark" />
+    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=holll/teledown&type=Date" />
+    <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=holll/teledown&type=Date" />
+  </picture>
+</a>
