@@ -11,7 +11,24 @@ from tools.monit import StartMonit
 from tools.tool import print_all_channel, Hook, print_group, initDb, md5
 from tools.upload_file import upload_file
 
-config_path = './config.json'
+# 1.创建解释器
+parser = argparse.ArgumentParser()
+# 2.创建一个互斥参数组
+mutex_group = parser.add_mutually_exclusive_group()
+# 3.添加需要的参数
+parser.add_argument('-c', '--config', default='config.json', help='配置文件')
+parser.add_argument('-re', '--refresh', action='store_true', help='刷新缓存')
+mutex_group.add_argument('-up', '--upload', action='store_true', help='上传文件')
+mutex_group.add_argument('-down', '--download', action='store_true', help='下载文件')
+mutex_group.add_argument('-print', action='store_true', help='打印消息')
+mutex_group.add_argument('-m', '--monit', action='store_true', help='监控频道')
+parser.add_argument('-id', help='频道ID')
+parser.add_argument('--range', default='>0', help='下载范围')
+parser.add_argument('-path', help='上传路径')
+parser.add_argument('-dau', default='N', choices=['y', 'Y', 'n', 'N'], help='上传完成删除原文件')
+# 3.进行参数解析
+args = parser.parse_args()
+config_path = args.config
 # 配置处理开始
 with open(config_path, 'r', encoding='utf-8') as f:
     config = json.load(f)
@@ -62,22 +79,6 @@ async def client_main():
 
 
 if __name__ == '__main__':
-    # 1.创建解释器
-    parser = argparse.ArgumentParser()
-    # 2.创建一个互斥参数组
-    mutex_group = parser.add_mutually_exclusive_group()
-    # 3.添加需要的参数
-    parser.add_argument('-re', '--refresh', action='store_true', help='刷新缓存')
-    mutex_group.add_argument('-up', '--upload', action='store_true', help='上传文件')
-    mutex_group.add_argument('-down', '--download', action='store_true', help='下载文件')
-    mutex_group.add_argument('-print', action='store_true', help='打印消息')
-    mutex_group.add_argument('-m', '--monit', action='store_true', help='监控频道')
-    parser.add_argument('-id', help='频道ID')
-    parser.add_argument('--range', default='>0', help='下载范围')
-    parser.add_argument('-path', help='上传路径')
-    parser.add_argument('-dau', default='N', choices=['y', 'Y', 'n', 'N'], help='上传完成删除原文件')
-    # 3.进行参数解析
-    args = parser.parse_args()
     # 除了刷新缓存，都需要频道ID
     if not args.refresh and args.id is None:
         sys.exit(1)
