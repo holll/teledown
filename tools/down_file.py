@@ -87,7 +87,6 @@ async def down_group(client: TelegramClient, chat_id, plus_func: str):
     chat_id = await GetChatId(client, chat_id)
     channel_title, messages = await getHistoryMessage(client, chat_id, plus_func)  # messages是倒序的
     async for message in messages:
-        print(message)
         """转发消息
         await message.forward_to('me')
         """
