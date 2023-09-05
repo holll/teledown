@@ -1,10 +1,8 @@
 import os
-import re
 import sys
 from asyncio import CancelledError
 from datetime import datetime
 
-import demoji
 from telethon import TelegramClient
 from telethon.errors import FileReferenceExpiredError
 
@@ -43,12 +41,13 @@ async def download_file(client: TelegramClient, channel_title, channel_id, messa
     is_photo = media_type == 'image'
     is_video = media_type == 'video'
     is_audio = media_type == 'audio'
+    is_file = media_type == 'application'
 
     message_time = message.date
     formatted_time = datetime.strftime(message_time, '%Y_%m')
 
     # 如果不是文件就放弃（可能是音频文字啥的）
-    if not (is_photo or is_video or is_audio):
+    if not (is_photo or is_video or is_audio or is_file):
         return
     file_name = GetFileName(message)
     file_path = f'{os.environ["save_path"]}/{channel_title}-{channel_id}/{file_name}'
@@ -88,6 +87,7 @@ async def down_group(client: TelegramClient, chat_id, plus_func: str):
     chat_id = await GetChatId(client, chat_id)
     channel_title, messages = await getHistoryMessage(client, chat_id, plus_func)  # messages是倒序的
     async for message in messages:
+        print(message)
         """转发消息
         await message.forward_to('me')
         """
