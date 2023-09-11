@@ -4,6 +4,7 @@ import re
 import subprocess
 import sys
 from io import BytesIO
+from typing import Union
 
 import demoji
 import pandas as pd
@@ -57,7 +58,7 @@ async def getHistoryMessage(client: TelegramClient, chat_id: int, plus_func=None
             tmpId = plus_func[1:].split('s')
             messages = client.iter_messages(chat_id, max_id=int(tmpId[-1]), min_id=int(tmpId[0]))
     else:
-        messages = client.iter_messages(chat_id, reverse=True, min_id=1)
+        messages = client.iter_messages(chat_id, reverse=True, min_id=1, from_user='ggghh136')
     return channel_title, messages
 
 
@@ -72,11 +73,19 @@ async def GetChatId(client: TelegramClient, chat_id: str) -> int:
     return chat_id
 
 
-async def GetChatTitle(client: TelegramClient, chat_id: int) -> str:
-    channelData = await client.get_entity(chat_id)
-    channel_title = channelData.title
-    channel_title = re.sub(r'[\\/:*?"<>|]', '', demoji.replace(channel_title, ''))
-    return channel_title
+async def GetChatTitle(client: TelegramClient, chat_id: int) -> Union[str, None]:
+    entity = await client.get_entity(chat_id)
+    if isinstance(entity, types.User):
+        title = f'{entity.username}({entity.first_name + str(entity.last_name)})'
+    elif isinstance(entity, types.Channel):
+        title = entity.title
+    elif isinstance(entity, types.Chat):
+        title = ''
+        pass
+    else:
+        return None
+    title = re.sub(r'[\\/:*?"<>|]', '', demoji.replace(title, ''))
+    return title
 
 
 def GetFileId(message) -> str:
