@@ -10,7 +10,7 @@ Pipfile*
 *.so
 
 # config
-config.*
+*.json
 !config.example.*
 *.session
 
@@ -18,9 +18,7 @@ config.*
 tmp/
 .Python
 .idea/
-build/
 develop-eggs/
-dist/
 downloads/
 eggs/
 .eggs/

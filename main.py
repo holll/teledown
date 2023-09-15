@@ -1,3 +1,4 @@
+import argparse
 import json
 import os
 import sys
@@ -10,10 +11,26 @@ from tools.monit import StartMonit
 from tools.tool import print_all_channel, Hook, print_group, initDb, md5
 from tools.upload_file import upload_file
 
-config_path = './config.json'
+# 1.创建解释器
+parser = argparse.ArgumentParser()
+# 2.创建一个互斥参数组
+mutex_group = parser.add_mutually_exclusive_group()
+# 3.添加需要的参数
+parser.add_argument('-c', '--config', default='config.json', help='配置文件')
+parser.add_argument('-re', '--refresh', action='store_true', help='刷新缓存')
+mutex_group.add_argument('-up', '--upload', action='store_true', help='上传文件')
+mutex_group.add_argument('-down', '--download', action='store_true', help='下载文件')
+mutex_group.add_argument('-print', action='store_true', help='打印消息')
+mutex_group.add_argument('-m', '--monit', action='store_true', help='监控频道')
+parser.add_argument('-id', help='频道ID')
+parser.add_argument('-user', help='指定下载用户', default=None)
+parser.add_argument('--range', default='>0', help='下载范围')
+parser.add_argument('-path', help='上传路径')
+parser.add_argument('-dau', default='N', choices=['y', 'Y', 'n', 'N'], help='上传完成删除原文件')
+# 3.进行参数解析
+args = parser.parse_args()
+config_path = args.config
 # 配置处理开始
-# These example values won't work. You must get your own api_id and
-# api_hash from https://my.telegram.org, under API Development.
 with open(config_path, 'r', encoding='utf-8') as f:
     config = json.load(f)
 api_id = config.get('api_id')
@@ -37,11 +54,9 @@ if proxy_port is not None:
     client = TelegramClient(md5Token, api_id, api_hash, proxy=(socks.SOCKS5, proxy_ip, proxy_port))
 else:
     client = TelegramClient(md5Token, api_id, api_hash)
+
+
 # 配置处理结束
-
-
-# 接受监视的媒体格式(tg里面直接发送gif最后是mp4格式！)，如果需要下载mp4内容可以添加"image/mp4"
-accept_file_format = ["image/jpeg", "image/gif", "image/png", "image/webp", "video/mp4"]
 
 
 async def upDate_dialogs():
@@ -63,47 +78,33 @@ async def client_main():
 
 
 if __name__ == '__main__':
+    # 除了刷新缓存，都需要频道ID
+    if not args.refresh and args.id is None:
+        sys.exit(1)
+    if args.upload and args.path is None:
+        print('缺失上传路径')
+        sys.exit(1)
     with client.start(phone=phone, bot_token=bot_token):
         client.loop.run_until_complete(client_main())
         client.loop.run_until_complete(Hook(client))
-        plus_func = '>0'
-        if len(sys.argv) == 1:
-            select = input('功能选择：\n1、查看所有频道\n2、下载频道资源\n3、上传频道资源\n4、查看频道资源\n5、监控模式\n')
-            channel_id = None
-        else:
-            select = '2'
-            if 't.me' in sys.argv[1]:
-                tmpList = sys.argv[1].split('/')
+        if args.refresh:
+            print_all_channel(client=client)
+        elif args.download:
+            if 't.me' in args.id:
+                tmpList = args.id.split('/')
                 channel_id = tmpList[-2]
                 plus_func = '=' + tmpList[-1]
             else:
-                channel_id = sys.argv[1]
-                if len(sys.argv) == 3:
-                    plus_func = sys.argv[2]
-        if select == '1':
-            print_all_channel(client=client)
-        elif select == '2':
-            if channel_id is None:
-                channel_id = input('频道id：')
-            client.loop.run_until_complete(down_group(client, channel_id, plus_func))
-        elif select == '3':
-            channel_id = input('上传到：')
-            folder_path = input('文件（夹）路径：')
-            while True:
-                del_after_upload = input('上传后删除原文件(Y/N)：').upper()
-                if del_after_upload == 'Y':
-                    del_after_upload = True
-                    break
-                elif del_after_upload == 'N':
-                    del_after_upload = False
-                    break
-                else:
-                    print("无效的输入，请重新输入")
-            client.loop.run_until_complete(upload_file(client, channel_id, folder_path,del_after_upload))
-        elif select == '4':
-            chat_id = input('请输入频道id:')
-            client.loop.run_until_complete(print_group(client, chat_id))
-        elif select == '5':
-            channel_ids = input('请输入需要监控的频道(以,分割):\n').split(',')
+                channel_id = args.id
+                plus_func = args.range
+            for _id in channel_id.split('|'):
+                client.loop.run_until_complete(down_group(client, _id, plus_func, args.user))
+        elif args.upload:
+            del_after_upload = True if args.dau.upper() == 'Y' else False
+            client.loop.run_until_complete(upload_file(client, args.id, args.path, del_after_upload))
+        elif args.print:
+            client.loop.run_until_complete(print_group(client, args.id))
+        elif args.monit:
+            channel_ids = args.id.split(',')
             client.loop.run_until_complete(StartMonit(client, channel_ids))
             client.run_until_disconnected()

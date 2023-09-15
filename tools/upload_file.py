@@ -4,9 +4,10 @@ import sys
 from asyncio import CancelledError
 from io import BytesIO
 
+import telethon.errors
 from moviepy.editor import VideoFileClip
 from telethon import TelegramClient
-from telethon.tl.types import DocumentAttributeVideo
+from telethon.tl.types import DocumentAttributeVideo, PeerChannel
 
 from tools.tool import get_all_files, GetThumb
 from tools.tqdm import TqdmUpTo
@@ -17,7 +18,10 @@ async def upload_file(client: TelegramClient, chat_id, path: str, del_after_uplo
     if isId:
         chat_id = int(chat_id)
     if chat_id != 'me':
-        peo = await client.get_entity(chat_id)
+        if client.is_bot():
+            peo = await client.get_entity(PeerChannel(chat_id))
+        else:
+            peo = await client.get_entity(chat_id)
     else:
         peo = 'me'
     path_list = []
@@ -58,8 +62,8 @@ async def upload_file(client: TelegramClient, chat_id, path: str, del_after_uplo
             # 上传文件到Telegram服务器
             try:
                 result = await client.upload_file(file_path, progress_callback=bar.update_to)
-            except RuntimeError:
-                print(f'上传出错，跳过{file_caption}')
+            except (RuntimeError, telethon.errors.FilePartsInvalidError) as e:
+                print(f'上传出错，错误原因{e.__class__.__name__}，跳过{file_caption}')
                 continue
             except CancelledError:
                 print("取消上传")
