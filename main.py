@@ -23,6 +23,7 @@ mutex_group.add_argument('-down', '--download', action='store_true', help='下�
 mutex_group.add_argument('-print', action='store_true', help='打印消息')
 mutex_group.add_argument('-m', '--monit', action='store_true', help='监控频道')
 parser.add_argument('-id', help='频道ID')
+parser.add_argument('-user', help='指定下载用户', default=None)
 parser.add_argument('--range', default='>0', help='下载范围')
 parser.add_argument('-path', help='上传路径')
 parser.add_argument('-dau', default='N', choices=['y', 'Y', 'n', 'N'], help='上传完成删除原文件')
@@ -53,11 +54,9 @@ if proxy_port is not None:
     client = TelegramClient(md5Token, api_id, api_hash, proxy=(socks.SOCKS5, proxy_ip, proxy_port))
 else:
     client = TelegramClient(md5Token, api_id, api_hash)
+
+
 # 配置处理结束
-
-
-# 接受监视的媒体格式(tg里面直接发送gif最后是mp4格式！)，如果需要下载mp4内容可以添加"image/mp4"
-accept_file_format = ["image/jpeg", "image/gif", "image/png", "image/webp", "video/mp4"]
 
 
 async def upDate_dialogs():
@@ -99,7 +98,7 @@ if __name__ == '__main__':
                 channel_id = args.id
                 plus_func = args.range
             for _id in channel_id.split('|'):
-                client.loop.run_until_complete(down_group(client, _id, plus_func))
+                client.loop.run_until_complete(down_group(client, _id, plus_func, args.user))
         elif args.upload:
             del_after_upload = True if args.dau.upper() == 'Y' else False
             client.loop.run_until_complete(upload_file(client, args.id, args.path, del_after_upload))

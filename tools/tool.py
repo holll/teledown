@@ -40,7 +40,7 @@ def print_all_channel(client: TelegramClient):
     print('全部输出完成')
 
 
-async def getHistoryMessage(client: TelegramClient, chat_id: int, plus_func=None):
+async def getHistoryMessage(client: TelegramClient, chat_id: int, plus_func=None, from_user=None):
     channel_title = await GetChatTitle(client, chat_id)
     messages = None
     # Todo 根据plus_func获取指定消息区间
@@ -49,16 +49,16 @@ async def getHistoryMessage(client: TelegramClient, chat_id: int, plus_func=None
         if filterFunc != 's':
             specifyID = int(plus_func[1:])
             if filterFunc == '=':
-                messages = client.iter_messages(chat_id, ids=specifyID)
+                messages = client.iter_messages(chat_id, ids=specifyID, from_user=from_user)
             elif filterFunc == '>':
-                messages = client.iter_messages(chat_id, min_id=specifyID)
+                messages = client.iter_messages(chat_id, min_id=specifyID, from_user=from_user)
             elif filterFunc == '<':
-                messages = client.iter_messages(chat_id, max_id=specifyID)
+                messages = client.iter_messages(chat_id, max_id=specifyID, from_user=from_user)
         else:
             tmpId = plus_func[1:].split('s')
-            messages = client.iter_messages(chat_id, max_id=int(tmpId[-1]), min_id=int(tmpId[0]))
+            messages = client.iter_messages(chat_id, max_id=int(tmpId[-1]), min_id=int(tmpId[0]), from_user=from_user)
     else:
-        messages = client.iter_messages(chat_id, reverse=True, min_id=1, from_user='ggghh136')
+        messages = client.iter_messages(chat_id, reverse=True, min_id=1, from_user=from_user)
     return channel_title, messages
 
 
@@ -216,26 +216,3 @@ def md5(string):
 
 async def Hook(client: TelegramClient):
     return
-    channel_title, messages = await getHistoryMessage(client, 1318204623)
-    # 统计每个人的发言次数
-    count_say = {}
-    async for message in messages:
-        if message.from_id is not None:
-            count_say[message.from_id.user_id] = count_say.get(message.from_id.user_id, 0) + 1
-    user_say = {}
-    for user_id in count_say.keys():
-        people = await client.get_entity(user_id)
-        user_say[people.username] = count_say[user_id]
-    print(user_say)
-
-    # async for message in client.iter_messages('@chengguangjiepai', ):
-    #     if message.media is not None:
-    #         file_name = GetFileName(message)
-    #         file_path = f'{os.environ["save_path"]}/1-1/{file_name}'
-    #         file_size = message.file.size
-    #         print(f"开始下载：{file_name}")
-    #         with TqdmUpTo(total=file_size, bar_format=TqdmUpTo.bar_format, desc=file_name[:10]) as bar:
-    #             await message.download_media(file_path, progress_callback=bar.update_to)
-
-
-pass
