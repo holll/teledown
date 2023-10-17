@@ -4,7 +4,6 @@ import sys
 from asyncio import CancelledError
 from io import BytesIO
 
-import telethon.errors
 from moviepy.editor import VideoFileClip
 from telethon import TelegramClient
 from telethon.tl.types import DocumentAttributeVideo, PeerChannel
@@ -62,12 +61,12 @@ async def upload_file(client: TelegramClient, chat_id, path: str, del_after_uplo
             # 上传文件到Telegram服务器
             try:
                 result = await client.upload_file(file_path, progress_callback=bar.update_to)
-            except (RuntimeError, telethon.errors.FilePartsInvalidError) as e:
-                print(f'上传出错，错误原因{e.__class__.__name__}，跳过{file_caption}')
-                continue
             except CancelledError:
                 print("取消上传")
                 sys.exit()
+            except Exception as e:
+                print(f'上传出错，错误原因{e.__class__.__name__}，跳过{file_caption}')
+                continue
             await client.send_file(
                 peo,
                 result,

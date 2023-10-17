@@ -1,4 +1,6 @@
-demoji==1.1.0
-pandas==0.25.3
-SocksiPy_branch==1.01
-telethon==1.26.1
+demoji
+pandas
+telethon
+moviepy
+Pillow
+urllib3==1.26.6
