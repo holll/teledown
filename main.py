@@ -98,7 +98,7 @@ if __name__ == '__main__':
             if 't.me' in args.id:
                 tmpList = args.id.split('/')
                 channel_id = tmpList[-2]
-                plus_func = '=' + tmpList[-1]
+                plus_func = tmpList[-1]
             else:
                 channel_id = args.id
                 plus_func = args.range

@@ -40,20 +40,24 @@ def print_all_channel(client: TelegramClient):
     print('全部输出完成')
 
 
-async def getHistoryMessage(client: TelegramClient, chat_id: int, plus_func=None, from_user=None):
+async def getHistoryMessage(client: TelegramClient, chat_id: int, plus_func=Union[None, str], from_user=None):
     channel_title = await GetChatTitle(client, chat_id)
     messages = None
     # Todo 根据plus_func获取指定消息区间
     if plus_func is not None:
         filterFunc = plus_func[:1]
-        if filterFunc != 's':
+        if ',' in plus_func:
+            ids = [int(_id) for _id in plus_func.split(',')]
+            messages = client.iter_messages(chat_id, reverse=True, min_id=1, ids=ids)
+        elif filterFunc != 's':
             specifyID = int(plus_func[1:])
-            if filterFunc == '=':
-                messages = client.iter_messages(chat_id, ids=specifyID, from_user=from_user)
-            elif filterFunc == '>':
+            if filterFunc == '>':
                 messages = client.iter_messages(chat_id, min_id=specifyID, from_user=from_user)
             elif filterFunc == '<':
                 messages = client.iter_messages(chat_id, max_id=specifyID, from_user=from_user)
+            else:
+                ids = sorted([int(_id) for _id in plus_func.split(',')])
+                messages = client.iter_messages(chat_id, ids=ids, from_user=from_user)
         else:
             tmpId = plus_func[1:].split('s')
             messages = client.iter_messages(chat_id, max_id=int(tmpId[-1]), min_id=int(tmpId[0]), from_user=from_user)
