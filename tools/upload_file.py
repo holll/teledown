@@ -34,11 +34,12 @@ async def upload_file(client: TelegramClient, chat_id, path: str, del_after_uplo
         if not os.path.exists(file_path):
             continue
         # 文件预处理，解析信息
-        file_caption = os.path.basename(file_path)
+        filename = os.path.basename(file_path)
+        filename_without_ext = filename.rsplit('.', maxsplit=1)[0]
         file_size = os.path.getsize(file_path)
         # 发送文件到指定的群组或频道
         isVideo = True
-        with TqdmUpTo(total=file_size, desc=file_caption) as bar:
+        with TqdmUpTo(total=file_size, desc=filename) as bar:
             try:
                 thumb_input = await client.upload_file(BytesIO(GetThumb(file_path)))
             except OSError:
@@ -65,12 +66,12 @@ async def upload_file(client: TelegramClient, chat_id, path: str, del_after_uplo
                 print("取消上传")
                 sys.exit()
             except Exception as e:
-                print(f'上传出错，错误原因{e.__class__.__name__}，跳过{file_caption}')
+                print(f'上传出错，错误原因{e.__class__.__name__}，跳过{filename}')
                 continue
             await client.send_file(
                 peo,
                 result,
-                caption=str2join(addtag, ' ',file_caption.rsplit('.', maxsplit=1)[0]),
+                caption=filename_without_ext if addtag is None else str2join(f'#{addtag} ', filename_without_ext),
                 thumb=thumb_input if isVideo else None,
                 progress_callback=bar.update_to,
                 attributes=[video_attr] if isVideo else None)
