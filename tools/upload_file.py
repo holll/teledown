@@ -8,11 +8,11 @@ from moviepy.editor import VideoFileClip
 from telethon import TelegramClient
 from telethon.tl.types import DocumentAttributeVideo, PeerChannel
 
-from tools.tool import get_all_files, GetThumb
+from tools.tool import get_all_files, GetThumb, str2join
 from tools.tqdm import TqdmUpTo
 
 
-async def upload_file(client: TelegramClient, chat_id, path: str, del_after_upload: bool):
+async def upload_file(client: TelegramClient, chat_id, path: str, del_after_upload: bool, addtag):
     isId = re.match(r'-?[1-9][0-9]{4,}', chat_id)
     if isId:
         chat_id = int(chat_id)
@@ -70,7 +70,7 @@ async def upload_file(client: TelegramClient, chat_id, path: str, del_after_uplo
             await client.send_file(
                 peo,
                 result,
-                caption=file_caption.rsplit('.', maxsplit=1)[0],
+                caption=str2join(addtag, ' ',file_caption.rsplit('.', maxsplit=1)[0]),
                 thumb=thumb_input if isVideo else None,
                 progress_callback=bar.update_to,
                 attributes=[video_attr] if isVideo else None)

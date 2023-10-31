@@ -216,5 +216,14 @@ def md5(string):
     return m.hexdigest()
 
 
+def str2join(*args) -> str:
+    content = ''
+    for char in args:
+        if char is None:
+            continue
+        content += str(char)
+    return content
+
+
 async def Hook(client: TelegramClient):
     return

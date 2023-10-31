@@ -27,6 +27,7 @@ parser.add_argument('-user', help='指定下载用户', default=None)
 parser.add_argument('--range', default='>0', help='下载范围')
 parser.add_argument('-path', help='上传路径')
 parser.add_argument('-dau', default='N', choices=['y', 'Y', 'n', 'N'], help='上传完成删除原文件')
+parser.add_argument('-at', '--addtag', help='增加tag')
 # 3.进行参数解析
 args = parser.parse_args()
 config_path = args.config
@@ -93,7 +94,7 @@ if __name__ == '__main__':
         client.loop.run_until_complete(Hook(client))
         if args.refresh:
             print_all_channel(client=client)
-        elif args.download:
+        if args.download:
             if 't.me' in args.id:
                 tmpList = args.id.split('/')
                 channel_id = tmpList[-2]
@@ -105,7 +106,7 @@ if __name__ == '__main__':
                 client.loop.run_until_complete(down_group(client, _id, plus_func, args.user))
         elif args.upload:
             del_after_upload = True if args.dau.upper() == 'Y' else False
-            client.loop.run_until_complete(upload_file(client, args.id, args.path, del_after_upload))
+            client.loop.run_until_complete(upload_file(client, args.id, args.path, del_after_upload, args.addtag))
         elif args.print:
             client.loop.run_until_complete(print_group(client, args.id))
         elif args.monit:
