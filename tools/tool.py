@@ -74,6 +74,8 @@ async def GetChatId(client: TelegramClient, chat_id: str) -> int:
 
 
 async def GetChatTitle(client: TelegramClient, chat_id: int) -> Union[str, None]:
+    if os.environ.get(str(chat_id)):
+        return os.environ.get(str(chat_id))
     entity = await client.get_entity(chat_id)
     if isinstance(entity, types.User):
         title = f'{entity.username}({entity.first_name + str(entity.last_name)})'

@@ -37,6 +37,7 @@ api_id = config.get('api_id')
 api_hash = config.get('api_hash')
 phone = config.get('phone')
 bot_token = config.get('bot_token')
+alias = config.get('alias')
 if (phone is not None and bot_token is not None) or (phone is None and bot_token is None):
     print('请确认使用机器人登录还是电话号码登录')
     exit()
@@ -44,6 +45,9 @@ if phone:
     md5Token = md5(phone)
 else:
     md5Token = md5(bot_token)
+if alias:
+    for _id in alias:
+        os.environ[_id] = alias[_id]
 initDb(md5Token)
 os.environ['save_path'] = save_path = config.get('save_path')
 proxy_ip = config.get('proxy_ip')
