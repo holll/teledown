@@ -191,7 +191,7 @@ def get_all_files(path):
             # 获取文件的绝对路径
             filepath = os.path.join(root, filename)
             all_files.append(filepath)
-    return all_files
+    return sorted(all_files)
 
 
 def GetThumb(file_path: str) -> bytes:
