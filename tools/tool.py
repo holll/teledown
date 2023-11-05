@@ -7,6 +7,7 @@ from io import BytesIO
 from typing import Union
 
 import demoji
+import magic
 import pandas as pd
 from PIL import Image
 from moviepy.video.io.VideoFileClip import VideoFileClip
@@ -224,6 +225,14 @@ def str2join(*args) -> str:
             continue
         content += str(char)
     return content
+
+
+def get_filetype(path: str) -> str:
+    magic_obj = magic.Magic(mime=True)
+    with open(path, 'rb') as f:
+        file_content = f.read(1024)
+        file_type = magic_obj.from_buffer(file_content)
+        return file_type
 
 
 async def Hook(client: TelegramClient):
