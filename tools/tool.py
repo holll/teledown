@@ -47,19 +47,24 @@ async def getHistoryMessage(client: TelegramClient, chat_id: int, plus_func=Unio
     # Todo 根据plus_func获取指定消息区间
     if plus_func is not None:
         filterFunc = plus_func[:1]
+        # 多选消息ID模式
         if ',' in plus_func:
             ids = [int(_id) for _id in plus_func.split(',')]
             messages = client.iter_messages(chat_id, reverse=True, min_id=1, ids=ids)
         elif filterFunc != 's':
             specifyID = int(plus_func[1:])
+            # 大于范围模式
             if filterFunc == '>':
                 messages = client.iter_messages(chat_id, min_id=specifyID, from_user=from_user)
+            # 小于范围模式
             elif filterFunc == '<':
                 messages = client.iter_messages(chat_id, max_id=specifyID, from_user=from_user)
             else:
-                ids = sorted([int(_id) for _id in plus_func.split(',')])
-                messages = client.iter_messages(chat_id, ids=ids, from_user=from_user)
+                # 单选模式
+                ids = int(plus_func)
+                messages = client.iter_messages(chat_id, ids=ids)
         else:
+            # 区间模式
             tmpId = plus_func[1:].split('s')
             messages = client.iter_messages(chat_id, max_id=int(tmpId[-1]), min_id=int(tmpId[0]), from_user=from_user)
     else:
