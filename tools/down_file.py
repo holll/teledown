@@ -73,9 +73,9 @@ async def download_file(client: TelegramClient, channel_title, channel_id, messa
         print(f"媒体已存在：{file_path}")
 
 
-async def down_group(client: TelegramClient, chat_id, plus_func: str,from_user):
+async def down_group(client: TelegramClient, chat_id, plus_func: str, from_user):
     chat_id = await GetChatId(client, chat_id)
-    channel_title, messages = await getHistoryMessage(client, chat_id, plus_func,from_user=from_user)  # messages是倒序的
+    channel_title, messages = await getHistoryMessage(client, chat_id, plus_func, from_user=from_user)  # messages是倒序的
     async for message in messages:
         """转发消息
         await message.forward_to('me')

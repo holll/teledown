@@ -7,6 +7,7 @@ from io import BytesIO
 from typing import Union
 
 import demoji
+import magic
 import pandas as pd
 from PIL import Image
 from moviepy.video.io.VideoFileClip import VideoFileClip
@@ -40,21 +41,30 @@ def print_all_channel(client: TelegramClient):
     print('全部输出完成')
 
 
-async def getHistoryMessage(client: TelegramClient, chat_id: int, plus_func=None, from_user=None):
+async def getHistoryMessage(client: TelegramClient, chat_id: int, plus_func=Union[None, str], from_user=None):
     channel_title = await GetChatTitle(client, chat_id)
     messages = None
     # Todo 根据plus_func获取指定消息区间
     if plus_func is not None:
         filterFunc = plus_func[:1]
-        if filterFunc != 's':
+        # 多选消息ID模式
+        if ',' in plus_func:
+            ids = [int(_id) for _id in plus_func.split(',')]
+            messages = client.iter_messages(chat_id, reverse=True, min_id=1, ids=ids)
+        elif filterFunc != 's':
             specifyID = int(plus_func[1:])
-            if filterFunc == '=':
-                messages = client.iter_messages(chat_id, ids=specifyID, from_user=from_user)
-            elif filterFunc == '>':
+            # 大于范围模式
+            if filterFunc == '>':
                 messages = client.iter_messages(chat_id, min_id=specifyID, from_user=from_user)
+            # 小于范围模式
             elif filterFunc == '<':
                 messages = client.iter_messages(chat_id, max_id=specifyID, from_user=from_user)
+            else:
+                # 单选模式
+                ids = int(plus_func)
+                messages = client.iter_messages(chat_id, ids=ids)
         else:
+            # 区间模式
             tmpId = plus_func[1:].split('s')
             messages = client.iter_messages(chat_id, max_id=int(tmpId[-1]), min_id=int(tmpId[0]), from_user=from_user)
     else:
@@ -74,6 +84,8 @@ async def GetChatId(client: TelegramClient, chat_id: str) -> int:
 
 
 async def GetChatTitle(client: TelegramClient, chat_id: int) -> Union[str, None]:
+    if os.environ.get(str(chat_id)):
+        return os.environ.get(str(chat_id))
     entity = await client.get_entity(chat_id)
     if isinstance(entity, types.User):
         title = f'{entity.username}({entity.first_name + str(entity.last_name)})'
@@ -185,7 +197,7 @@ def get_all_files(path):
             # 获取文件的绝对路径
             filepath = os.path.join(root, filename)
             all_files.append(filepath)
-    return all_files
+    return sorted(all_files)
 
 
 def GetThumb(file_path: str) -> bytes:
@@ -193,18 +205,15 @@ def GetThumb(file_path: str) -> bytes:
     with VideoFileClip(file_path) as video:
         # 获取视频中指定时间的图像
         video_image = video.get_frame(0)
+
     # 将图像转换为 PIL Image 对象
     video_image = Image.fromarray(video_image)
-    # 将图像缩放为指定大小
-    original_size = video_image.size
-    thumbnail_size = (320, int(original_size[1] * 320 / original_size[0]))
-    thumbnail_image = video_image.copy()
-    thumbnail_image.thumbnail(thumbnail_size)
 
-    # 将缩略图数据保存为 BytesIO 对象
+    # 将图像数据保存为 BytesIO 对象
     thumb_bytes_io = BytesIO()
-    thumbnail_image.save(thumb_bytes_io, format='JPEG')
+    video_image.save(thumb_bytes_io, format='JPEG')
     thumb_bytes = thumb_bytes_io.getvalue()
+
     return thumb_bytes
 
 
@@ -212,6 +221,23 @@ def md5(string):
     m = hashlib.md5()
     m.update(string.encode('utf-8'))
     return m.hexdigest()
+
+
+def str2join(*args) -> str:
+    content = ''
+    for char in args:
+        if char is None:
+            continue
+        content += str(char)
+    return content
+
+
+def get_filetype(path: str) -> str:
+    magic_obj = magic.Magic(mime=True)
+    with open(path, 'rb') as f:
+        file_content = f.read(1024)
+        file_type = magic_obj.from_buffer(file_content)
+        return file_type
 
 
 async def Hook(client: TelegramClient):

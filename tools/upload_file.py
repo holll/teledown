@@ -1,19 +1,18 @@
 import os
 import re
 import sys
-from asyncio import CancelledError
-from io import BytesIO
 
-import telethon.errors
-from moviepy.editor import VideoFileClip
 from telethon import TelegramClient
-from telethon.tl.types import DocumentAttributeVideo, PeerChannel
 
-from tools.tool import get_all_files, GetThumb
+from tools.tool import get_all_files, GetThumb, str2join, get_filetype
 from tools.tqdm import TqdmUpTo
 
 
-async def upload_file(client: TelegramClient, chat_id, path: str, del_after_upload: bool):
+async def upload_file(client: TelegramClient, chat_id, path: str, del_after_upload: bool, addtag):
+    from io import BytesIO
+    from asyncio import CancelledError
+    from moviepy.editor import VideoFileClip
+    from telethon.tl.types import DocumentAttributeVideo, PeerChannel
     isId = re.match(r'-?[1-9][0-9]{4,}', chat_id)
     if isId:
         chat_id = int(chat_id)
@@ -35,16 +34,14 @@ async def upload_file(client: TelegramClient, chat_id, path: str, del_after_uplo
         if not os.path.exists(file_path):
             continue
         # 文件预处理，解析信息
-        file_caption = os.path.basename(file_path)
+        filename = os.path.basename(file_path)
+        filename_without_ext = filename.rsplit('.', maxsplit=1)[0]
         file_size = os.path.getsize(file_path)
         # 发送文件到指定的群组或频道
-        isVideo = True
-        with TqdmUpTo(total=file_size, desc=file_caption) as bar:
+        isVideo = get_filetype(file_path).startswith('video')
+        if isVideo:
             try:
                 thumb_input = await client.upload_file(BytesIO(GetThumb(file_path)))
-            except OSError:
-                isVideo = False
-            if isVideo:
                 # 获取视频文件的时长
                 video_duration = int(VideoFileClip(file_path).duration)
                 # 获取视频文件的宽度和高度
@@ -59,22 +56,27 @@ async def upload_file(client: TelegramClient, chat_id, path: str, del_after_uplo
                     round_message=False,
                     supports_streaming=True
                 )
+            except OSError:
+                thumb_input = video_attr = None
+        else:
+            thumb_input = video_attr = None
+        with TqdmUpTo(total=file_size, desc=filename) as bar:
             # 上传文件到Telegram服务器
             try:
                 result = await client.upload_file(file_path, progress_callback=bar.update_to)
-            except (RuntimeError, telethon.errors.FilePartsInvalidError) as e:
-                print(f'上传出错，错误原因{e.__class__.__name__}，跳过{file_caption}')
-                continue
             except CancelledError:
                 print("取消上传")
                 sys.exit()
+            except Exception as e:
+                print(f'上传出错，错误原因{e.__class__.__name__}，跳过{filename}')
+                continue
             await client.send_file(
                 peo,
                 result,
-                caption=file_caption.rsplit('.', maxsplit=1)[0],
-                thumb=thumb_input if isVideo else None,
+                caption=filename_without_ext if addtag is None else str2join(f'#{addtag} ', filename_without_ext),
+                thumb=thumb_input,
                 progress_callback=bar.update_to,
-                attributes=[video_attr] if isVideo else None)
+                attributes=[video_attr])
             if del_after_upload:
                 os.remove(file_path)
     # except Exception as e:
