@@ -55,4 +55,17 @@ https://www.jianshu.com/p/3d047c7516cf
 ## 常见错误
 
 1. `AttributeError: module 'socks' has no attribute 'SOCKS5'`，请确认安装了PySocks
+2. `Server sent a very new message with ID xxxxxxxxxxxxxxxxxxx, ignoring`
+   ，如果你确定没有在多个设备上使用同一个session文件，那么这个问题是由于当前设备时间与telegram服务器时间差距过大（大于30s）。
+   解决办法：服务器时间戳是`xxxxxxxxxxxxxxxxxxx >> 32`，请将本地时间戳修改到与服务器时间戳相差30s以内
+3. `Could not find the input entity for XXXXXXX`，请先刷新缓存
 
+## Star历史
+
+<a href="https://github.com/holll/teledown/stargazers">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=holll/teledown&type=Date&theme=dark" />
+    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=holll/teledown&type=Date" />
+    <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=holll/teledown&type=Date" />
+  </picture>
+</a>
