@@ -3,7 +3,6 @@ import json
 import os
 import sys
 
-import socks
 from telethon import TelegramClient
 
 from tools.down_file import down_group
@@ -54,6 +53,8 @@ os.environ['save_path'] = save_path = config.get('save_path')
 proxy_ip = config.get('proxy_ip')
 proxy_port = config.get('proxy_port')
 if proxy_port is not None:
+    import socks
+
     if proxy_ip is None:
         proxy_ip = '127.0.0.1'
     client = TelegramClient(md5Token, api_id, api_hash, proxy=(socks.SOCKS5, proxy_ip, proxy_port))
