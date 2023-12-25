@@ -14,6 +14,7 @@ async def upload_file(client: TelegramClient, chat_id, path: str, del_after_uplo
     from moviepy.editor import VideoFileClip
     from telethon.tl.types import DocumentAttributeVideo, PeerChannel
     isId = re.match(r'-?[1-9][0-9]{4,}', chat_id)
+    isDir = os.path.isdir(path)
     if isId:
         chat_id = int(chat_id)
     if chat_id != 'me':
@@ -24,10 +25,10 @@ async def upload_file(client: TelegramClient, chat_id, path: str, del_after_uplo
     else:
         peo = 'me'
     path_list = []
-    if os.path.isfile(path):
-        path_list.append(path)
-    else:
+    if isDir:
         path_list = get_all_files(path)
+    else:
+        path_list.append(path)
     # 遍历文件夹下的所有文件
     for file_path in path_list:
         # 如果文件不存在，跳过上传（防呆处理）
@@ -79,5 +80,7 @@ async def upload_file(client: TelegramClient, chat_id, path: str, del_after_uplo
                 attributes=[video_attr])
             if del_after_upload:
                 os.remove(file_path)
+    if isDir and not os.listdir(path):
+        os.rmdir(path)
     # except Exception as e:
     #     print("上传出错", e.__class__.__name__)
