@@ -7,10 +7,7 @@ from io import BytesIO
 from typing import Union
 
 import demoji
-import magic
 import pandas as pd
-from PIL import Image
-from moviepy.video.io.VideoFileClip import VideoFileClip
 from telethon import TelegramClient
 from telethon.tl import types
 
@@ -201,6 +198,8 @@ def get_all_files(path):
 
 
 def GetThumb(file_path: str) -> bytes:
+    from PIL import Image
+    from moviepy.video.io.VideoFileClip import VideoFileClip
     # 打开视频文件并获取第一帧图像
     with VideoFileClip(file_path) as video:
         # 获取视频中指定时间的图像
@@ -233,6 +232,7 @@ def str2join(*args) -> str:
 
 
 def get_filetype(path: str) -> str:
+    import magic
     magic_obj = magic.Magic(mime=True)
     with open(path, 'rb') as f:
         file_content = f.read(1024)
