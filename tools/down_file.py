@@ -81,6 +81,9 @@ async def down_group(client: TelegramClient, chat_id, plus_func: str, from_user)
         """转发消息
         await message.forward_to('me')
         """
+        if message is None:
+            print('消息被删除')
+            continue
         if message.media is not None and not isinstance(message.media, MessageMediaWebPage):
             await download_file(client, channel_title, chat_id, message)
     print(channel_title, '全部下载完成')
