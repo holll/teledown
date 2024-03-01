@@ -40,7 +40,6 @@ def print_all_channel(client: TelegramClient):
 
 async def getHistoryMessage(client: TelegramClient, chat_id: int, plus_func=Union[None, str], from_user=None):
     channel_title = await GetChatTitle(client, chat_id)
-    messages = None
     # Todo 根据plus_func获取指定消息区间
     if plus_func is not None:
         filterFunc = plus_func[:1]
@@ -58,8 +57,7 @@ async def getHistoryMessage(client: TelegramClient, chat_id: int, plus_func=Unio
                 messages = client.iter_messages(chat_id, max_id=specifyID, from_user=from_user)
             else:
                 # 单选模式
-                ids = int(plus_func)
-                messages = client.iter_messages(chat_id, ids=ids)
+                messages = client.iter_messages(chat_id, ids=specifyID)
         else:
             # 区间模式
             tmpId = plus_func[1:].split('s')

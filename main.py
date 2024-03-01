@@ -50,14 +50,27 @@ if alias:
         os.environ[_id] = alias[_id]
 initDb(md5Token)
 os.environ['save_path'] = save_path = config.get('save_path')
-proxy_ip = config.get('proxy_ip')
-proxy_port = config.get('proxy_port')
-if proxy_port is not None:
-    import socks
-
-    if proxy_ip is None:
-        proxy_ip = '127.0.0.1'
-    client = TelegramClient(md5Token, api_id, api_hash, proxy=(socks.SOCKS5, proxy_ip, proxy_port))
+proxy = config.get('proxy')
+if proxy is not None:
+    username = None
+    password = None
+    if '@' in proxy:
+        username = proxy.split('@')[0].split(':')[0]
+        password = proxy.split('@')[0].split(':')[1]
+        addr = proxy.split('@')[1].split(':')[0]
+        port = proxy.split('@')[1].split(':')[1]
+    else:
+        addr = proxy.split(':')[0]
+        port = proxy.split(':')[1]
+    proxy = {
+        'proxy_type': 'socks5',  # (mandatory) protocol to use (see above)
+        'addr': addr,  # (mandatory) proxy IP address
+        'port': int(port),  # (mandatory) proxy port number
+        'username': username,  # (optional) username if the proxy requires auth
+        'password': password,  # (optional) password if the proxy requires auth
+        'rdns': True  # (optional) whether to use remote or local resolve, default remote
+    }
+    client = TelegramClient(md5Token, api_id, api_hash, proxy=proxy)
 else:
     client = TelegramClient(md5Token, api_id, api_hash)
 
@@ -99,7 +112,7 @@ if __name__ == '__main__':
             if 't.me' in args.id:
                 tmpList = args.id.split('/')
                 channel_id = tmpList[-2]
-                plus_func = tmpList[-1]
+                plus_func = '=' + tmpList[-1]
             else:
                 channel_id = args.id
                 plus_func = args.range
