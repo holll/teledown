@@ -42,7 +42,6 @@ async def download_file(client: TelegramClient, channel_title, channel_id, messa
 
     file_name = GetFileName(message)
     file_path = f'{os.environ["save_path"]}/{channel_title}-{channel_id}/{file_name}'
-    new_file_path = f'{os.environ["save_path"]}/{channel_title}-{channel_id}/{formatted_time}/{file_name}'
     file_size = message.file.size
     ret, file_path = fileExist(file_path, file_size)
     if not ret:
@@ -56,6 +55,7 @@ async def download_file(client: TelegramClient, channel_title, channel_id, messa
             print("取消下载")
             os.remove(download_path)
             sys.exit()
+        # Todo 最新测试版telethon已经会捕获FileReferenceExpiredError了
         except FileReferenceExpiredError:
             if old:
                 print('重试失败，退出下载')
