@@ -5,7 +5,7 @@ from datetime import datetime
 
 from telethon import TelegramClient
 from telethon.errors import FileReferenceExpiredError
-from telethon.tl.types import MessageMediaWebPage
+from telethon.tl.types import MessageMediaDocument, MessageMediaPhoto
 
 from tools.tool import GetFileName, getHistoryMessage, GetChatId
 from tools.tqdm import TqdmUpTo
@@ -82,8 +82,14 @@ async def down_group(client: TelegramClient, chat_id, plus_func: str, from_user)
         await message.forward_to('me')
         """
         if message is None:
-            print('消息被删除')
+            print('慢了一步，消息已被删除')
             continue
-        if message.media is not None and not isinstance(message.media, MessageMediaWebPage):
-            await download_file(client, channel_title, chat_id, message)
+        '''
+        判定消息中是否存在媒体内容
+        MessageMediaDocument:文件、语音、视频
+        MessageMediaPhoto:图片
+        '''
+        if not isinstance(message.media, (MessageMediaDocument, MessageMediaPhoto)):
+            continue
+        await download_file(client, channel_title, chat_id, message)
     print(channel_title, '全部下载完成')

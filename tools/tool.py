@@ -108,7 +108,7 @@ def GetFileId(message) -> str:
 
 def GetFileName(message) -> str:
     # 取名优先级，文件名>描述>ID
-    if message.file and message.file.name:
+    if message.file.name:
         return message.file.name
 
     if len(message.message) != 0:
