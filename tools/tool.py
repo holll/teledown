@@ -7,10 +7,7 @@ from io import BytesIO
 from typing import Union
 
 import demoji
-import magic
 import pandas as pd
-from PIL import Image
-from moviepy.video.io.VideoFileClip import VideoFileClip
 from telethon import TelegramClient
 from telethon.tl import types
 
@@ -43,7 +40,8 @@ def print_all_channel(client: TelegramClient):
 
 async def getHistoryMessage(client: TelegramClient, chat_id: int, plus_func=Union[None, str], from_user=None):
     channel_title = await GetChatTitle(client, chat_id)
-    messages = None
+    if from_user is not None and from_user.isdecimal():
+        from_user = int(from_user)
     # Todo 根据plus_func获取指定消息区间
     if plus_func is not None:
         filterFunc = plus_func[:1]
@@ -61,8 +59,7 @@ async def getHistoryMessage(client: TelegramClient, chat_id: int, plus_func=Unio
                 messages = client.iter_messages(chat_id, max_id=specifyID, from_user=from_user)
             else:
                 # 单选模式
-                ids = int(plus_func)
-                messages = client.iter_messages(chat_id, ids=ids)
+                messages = client.iter_messages(chat_id, ids=specifyID)
         else:
             # 区间模式
             tmpId = plus_func[1:].split('s')
@@ -201,6 +198,8 @@ def get_all_files(path):
 
 
 def GetThumb(file_path: str) -> bytes:
+    from PIL import Image
+    from moviepy.video.io.VideoFileClip import VideoFileClip
     # 打开视频文件并获取第一帧图像
     with VideoFileClip(file_path) as video:
         # 获取视频中指定时间的图像
@@ -233,6 +232,7 @@ def str2join(*args) -> str:
 
 
 def get_filetype(path: str) -> str:
+    import magic
     magic_obj = magic.Magic(mime=True)
     with open(path, 'rb') as f:
         file_content = f.read(1024)

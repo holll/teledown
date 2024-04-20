@@ -5,6 +5,7 @@ from datetime import datetime
 
 from telethon import TelegramClient
 from telethon.errors import FileReferenceExpiredError
+from telethon.tl.types import MessageMediaDocument, MessageMediaPhoto
 
 from tools.tool import GetFileName, getHistoryMessage, GetChatId
 from tools.tqdm import TqdmUpTo
@@ -41,7 +42,6 @@ async def download_file(client: TelegramClient, channel_title, channel_id, messa
 
     file_name = GetFileName(message)
     file_path = f'{os.environ["save_path"]}/{channel_title}-{channel_id}/{file_name}'
-    new_file_path = f'{os.environ["save_path"]}/{channel_title}-{channel_id}/{formatted_time}/{file_name}'
     file_size = message.file.size
     ret, file_path = fileExist(file_path, file_size)
     if not ret:
@@ -55,6 +55,7 @@ async def download_file(client: TelegramClient, channel_title, channel_id, messa
             print("取消下载")
             os.remove(download_path)
             sys.exit()
+        # Todo 最新测试版telethon已经会捕获FileReferenceExpiredError了
         except FileReferenceExpiredError:
             if old:
                 print('重试失败，退出下载')
@@ -80,6 +81,15 @@ async def down_group(client: TelegramClient, chat_id, plus_func: str, from_user)
         """转发消息
         await message.forward_to('me')
         """
-        if message.media is not None:
-            await download_file(client, channel_title, chat_id, message)
+        if message is None:
+            print('慢了一步，消息已被删除')
+            continue
+        '''
+        判定消息中是否存在媒体内容
+        MessageMediaDocument:文件、语音、视频
+        MessageMediaPhoto:图片
+        '''
+        if not isinstance(message.media, (MessageMediaDocument, MessageMediaPhoto)):
+            continue
+        await download_file(client, channel_title, chat_id, message)
     print(channel_title, '全部下载完成')
