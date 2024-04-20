@@ -41,7 +41,7 @@ async def download_file(client: TelegramClient, channel_title, channel_id, messa
     formatted_time = datetime.strftime(message_time, '%Y_%m')
 
     file_name = GetFileName(message)
-    file_path = f'{os.environ["save_path"]}/{channel_title}-{channel_id}/{file_name}'
+    file_path = os.path.join(os.environ["save_path"], f'{channel_title}-{channel_id}', file_name)
     file_size = message.file.size
     ret, file_path = fileExist(file_path, file_size)
     if not ret:
