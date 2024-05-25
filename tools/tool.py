@@ -111,11 +111,11 @@ def GetFileName(message) -> str:
     if message.file.name:
         return message.file.name
 
+    file_ext = '.jpg' if message.file.ext in ['.jpe','jpeg'] else message.file.ext
     if len(message.message) != 0:
         sName = shorten_filename(demoji.replace(message.message, '[emoji]'))
-        return re.sub(r'[\\/:*?"<>|]', '_', sName) + message.file.ext
-
-    return GetFileId(message) + message.file.ext
+        return re.sub(r'[\\/:*?"<>|]', '_', sName) + file_ext
+    return GetFileId(message) + file_ext
 
 
 async def print_group(client: TelegramClient, chat_id):
