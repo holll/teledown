@@ -52,6 +52,7 @@ initDb(md5Token)
 os.environ['save_path'] = save_path = config.get('save_path')
 proxy = config.get('proxy')
 if proxy is not None:
+    import python_socks
     username = None
     password = None
     if '@' in proxy:
@@ -63,7 +64,7 @@ if proxy is not None:
         addr = proxy.split(':')[0]
         port = proxy.split(':')[1]
     proxy = {
-        'proxy_type': 'socks5',  # (mandatory) protocol to use (see above)
+        'proxy_type': python_socks.ProxyType.SOCKS5,  # (mandatory) protocol to use (see above)
         'addr': addr,  # (mandatory) proxy IP address
         'port': int(port),  # (mandatory) proxy port number
         'username': username,  # (optional) username if the proxy requires auth
@@ -76,10 +77,6 @@ else:
 
 
 # 配置处理结束
-
-
-async def upDate_dialogs():
-    await client.get_dialogs()
 
 
 # 展示登陆的信息
