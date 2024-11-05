@@ -71,15 +71,18 @@ async def upload_file(client: TelegramClient, chat_id, path: str, del_after_uplo
             except Exception as e:
                 print(f'上传出错，错误原因{e.__class__.__name__}，跳过{filename}')
                 continue
-            await client.send_file(
-                peo,
-                result,
-                caption=filename_without_ext if addtag is None else str2join(f'#{addtag} ', filename_without_ext),
-                thumb=thumb_input,
-                progress_callback=bar.update_to,
-                attributes=[video_attr])
-            if del_after_upload:
-                os.remove(file_path)
+            try:
+                await client.send_file(
+                    entity=peo,
+                    file=result,
+                    caption=filename_without_ext if addtag is None else str2join(f'#{addtag} ', filename_without_ext),
+                    thumb=thumb_input,
+                    progress_callback=bar.update_to,
+                    attributes=[video_attr])
+                if del_after_upload:
+                    os.remove(file_path)
+            except Exception:
+                print(f'上传出错，疑似文件损坏，跳过{filename}')
     if isDir and not os.listdir(path):
         os.rmdir(path)
     # except Exception as e:
