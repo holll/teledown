@@ -53,16 +53,20 @@ os.environ['save_path'] = save_path = config.get('save_path')
 proxy = config.get('proxy')
 if proxy is not None:
     import python_socks
+
     username = None
     password = None
+    ip_port = proxy
     if '@' in proxy:
-        username = proxy.split('@')[0].split(':')[0]
-        password = proxy.split('@')[0].split(':')[1]
-        addr = proxy.split('@')[1].split(':')[0]
-        port = proxy.split('@')[1].split(':')[1]
-    else:
-        addr = proxy.split(':')[0]
-        port = proxy.split(':')[1]
+        auth_ipaddress = proxy.split('@')
+        user_pass = auth_ipaddress[0].split(':')[0]
+        username = user_pass[0]
+        password = user_pass[1]
+        ip_port = auth_ipaddress[1]
+    # 适配ipv6
+    addr_port = ip_port.rsplit(':', 1)
+    addr = addr_port[0]
+    port = addr_port[1]
     proxy = {
         'proxy_type': python_socks.ProxyType.SOCKS5,  # (mandatory) protocol to use (see above)
         'addr': addr,  # (mandatory) proxy IP address
