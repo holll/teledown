@@ -63,7 +63,7 @@ if proxy is not None:
     ip_port = proxy
     if '@' in proxy:
         auth_ipaddress = proxy.split('@')
-        user_pass = auth_ipaddress[0].split(':')[0]
+        user_pass = auth_ipaddress[0].split(':')
         username = user_pass[0]
         password = user_pass[1]
         ip_port = auth_ipaddress[1]
