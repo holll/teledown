@@ -7,7 +7,7 @@ from telethon import TelegramClient
 from telethon.errors import FileReferenceExpiredError
 from telethon.tl.types import MessageMediaDocument, MessageMediaPhoto
 
-from tools.tool import GetFileName, getHistoryMessage, GetChatId
+from tools.tool import GetFileName, getHistoryMessage, GetChatId, match_wildcard
 from tools.tqdm import TqdmUpTo
 
 
@@ -36,11 +36,13 @@ def GetFileSuffix(message) -> list:
     return mime_type.split('/')
 
 
-async def download_file(client: TelegramClient, channel_title, channel_id, message, old=False):
+async def download_file(client: TelegramClient, channel_title, channel_id, message, prefix, old=False):
     message_time = message.date
     formatted_time = datetime.strftime(message_time, '%Y_%m')
 
     file_name = GetFileName(message)
+    if not match_wildcard(prefix, file_name):
+        return
     file_path = os.path.join(os.environ["save_path"], f'{channel_title}-{channel_id}', file_name)
     file_size = message.file.size
     ret, file_path = fileExist(file_path, file_size)
@@ -74,7 +76,7 @@ async def download_file(client: TelegramClient, channel_title, channel_id, messa
         print(f"媒体已存在：{file_path}")
 
 
-async def down_group(client: TelegramClient, chat_id, plus_func: str, from_user):
+async def down_group(client: TelegramClient, chat_id, plus_func: str, from_user, prefix):
     chat_id = await GetChatId(client, chat_id)
     channel_title, messages = await getHistoryMessage(client, chat_id, plus_func, from_user=from_user)  # messages是倒序的
     async for message in messages:
@@ -91,5 +93,11 @@ async def down_group(client: TelegramClient, chat_id, plus_func: str, from_user)
         '''
         if not isinstance(message.media, (MessageMediaDocument, MessageMediaPhoto)):
             continue
-        await download_file(client, channel_title, chat_id, message)
+        await download_file(
+            client=client,
+            channel_title=channel_title,
+            channel_id=chat_id,
+            message=message,
+            prefix=prefix
+        )
     print(channel_title, '全部下载完成')
