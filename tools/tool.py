@@ -1,3 +1,4 @@
+import fnmatch
 import hashlib
 import os
 import re
@@ -111,7 +112,7 @@ def GetFileName(message) -> str:
     if message.file.name:
         return message.file.name
 
-    file_ext = '.jpg' if message.file.ext in ['.jpe','jpeg'] else message.file.ext
+    file_ext = '.jpg' if message.file.ext in ['.jpe', 'jpeg'] else message.file.ext
     if len(message.message) != 0:
         sName = shorten_filename(demoji.replace(message.message, '[emoji]'))
         return re.sub(r'[\\/:*?"<>|]', '_', sName) + file_ext
@@ -238,6 +239,12 @@ def get_filetype(path: str) -> str:
         file_content = f.read(1024)
         file_type = magic_obj.from_buffer(file_content)
         return file_type
+
+
+def match_wildcard(pattern, string):
+    if pattern is None:
+        return True
+    return fnmatch.fnmatch(string, pattern)
 
 
 async def Hook(client: TelegramClient):

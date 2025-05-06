@@ -24,9 +24,11 @@ mutex_group.add_argument('-m', '--monit', action='store_true', help='监控频�
 parser.add_argument('-id', help='频道ID')
 parser.add_argument('-user', help='指定下载用户', default=None)
 parser.add_argument('--range', default='>0', help='下载范围')
+parser.add_argument('--prefix', help='通配符', default=None)
 parser.add_argument('-path', help='上传路径')
 parser.add_argument('-dau', default='N', choices=['y', 'Y', 'n', 'N'], help='上传完成删除原文件')
 parser.add_argument('-at', '--addtag', help='增加tag')
+parser.add_argument('--proxy', help='代理')
 # 3.进行参数解析
 args = parser.parse_args()
 config_path = args.config
@@ -51,18 +53,24 @@ if alias:
 initDb(md5Token)
 os.environ['save_path'] = save_path = config.get('save_path')
 proxy = config.get('proxy')
+if args.proxy is not None:
+    proxy = args.proxy
 if proxy is not None:
     import python_socks
+
     username = None
     password = None
+    ip_port = proxy
     if '@' in proxy:
-        username = proxy.split('@')[0].split(':')[0]
-        password = proxy.split('@')[0].split(':')[1]
-        addr = proxy.split('@')[1].split(':')[0]
-        port = proxy.split('@')[1].split(':')[1]
-    else:
-        addr = proxy.split(':')[0]
-        port = proxy.split(':')[1]
+        auth_ipaddress = proxy.split('@')
+        user_pass = auth_ipaddress[0].split(':')
+        username = user_pass[0]
+        password = user_pass[1]
+        ip_port = auth_ipaddress[1]
+    # 适配ipv6
+    addr_port = ip_port.rsplit(':', 1)
+    addr = addr_port[0]
+    port = addr_port[1]
     proxy = {
         'proxy_type': python_socks.ProxyType.SOCKS5,  # (mandatory) protocol to use (see above)
         'addr': addr,  # (mandatory) proxy IP address
@@ -114,7 +122,7 @@ if __name__ == '__main__':
                 channel_id = args.id
                 plus_func = args.range
             for _id in channel_id.split('|'):
-                client.loop.run_until_complete(down_group(client, _id, plus_func, args.user))
+                client.loop.run_until_complete(down_group(client, _id, plus_func, args.user,args.prefix))
         elif args.upload:
             del_after_upload = True if args.dau.upper() == 'Y' else False
             client.loop.run_until_complete(upload_file(client, args.id, args.path, del_after_upload, args.addtag))
