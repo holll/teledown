@@ -66,7 +66,7 @@ async def download_file(client: TelegramClient, channel_title, channel_id, messa
             channelData = await client.get_entity(int(channel_id))
             newMessages = client.iter_messages(entity=channelData, ids=message.id)
             async for newMessage in newMessages:
-                await download_file(client, channel_title, channel_id, newMessage, old=True)
+                await download_file(client, channel_title, channel_id, newMessage, prefix, old=True)
         except Exception as e:
             print("下载出错", e.__class__.__name__)
             os.remove(download_path)
