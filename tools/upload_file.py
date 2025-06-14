@@ -21,7 +21,7 @@ async def upload_file(client: TelegramClient, chat_id, path: str, del_after_uplo
     if isId:
         chat_id = int(chat_id)
     if chat_id != 'me':
-        if client.is_bot():
+        if await client.is_bot():
             peo = await client.get_entity(PeerChannel(chat_id))
         else:
             peo = await client.get_entity(chat_id)
