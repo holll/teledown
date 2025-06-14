@@ -11,7 +11,10 @@ from tools.tqdm import TqdmUpTo
 async def upload_file(client: TelegramClient, chat_id, path: str, del_after_upload: bool, addtag):
     from io import BytesIO
     from asyncio import CancelledError
-    from moviepy.editor import VideoFileClip
+    try:
+        from moviepy.editor import VideoFileClip
+    except ModuleNotFoundError:
+        from moviepy.video.io.VideoFileClip import VideoFileClip
     from telethon.tl.types import DocumentAttributeVideo, PeerChannel
     isId = re.match(r'-?[1-9][0-9]{4,}', chat_id)
     isDir = os.path.isdir(path)
