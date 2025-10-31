@@ -5,7 +5,7 @@ from datetime import datetime
 
 from telethon import TelegramClient
 from telethon.errors import FileReferenceExpiredError
-from telethon.tl.types import MessageMediaDocument, MessageMediaPhoto
+from telethon.tl.types import MessageMediaDocument, MessageMediaPhoto, DocumentAttributeSticker
 
 from tools.tool import GetFileName, getHistoryMessage, GetChatId, match_wildcard
 from tools.tqdm import TqdmUpTo
@@ -93,6 +93,11 @@ async def down_group(client: TelegramClient, chat_id, plus_func: str, from_user,
         '''
         if not isinstance(message.media, (MessageMediaDocument, MessageMediaPhoto)):
             continue
+
+        if isinstance(message.media, MessageMediaDocument) and any(
+                isinstance(attr, DocumentAttributeSticker) for attr in message.media.document.attributes):
+            continue
+
         await download_file(
             client=client,
             channel_title=channel_title,

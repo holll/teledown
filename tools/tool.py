@@ -244,7 +244,8 @@ def get_filetype(path: str) -> str:
 def match_wildcard(pattern, string):
     if pattern is None:
         return True
-    return fnmatch.fnmatch(string, pattern)
+    patterns = pattern.split(";")
+    return any(fnmatch.fnmatch(string, pat) for pat in patterns)
 
 
 async def Hook(client: TelegramClient):
