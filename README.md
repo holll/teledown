@@ -55,6 +55,8 @@ python main.py [-c config.json] [--proxy user:pass@ip:port]
   -id     频道ID，多个频道用|或,分隔
 子命令 monit：
   -id     频道ID，多个频道用逗号分隔
+  -user   仅监控指定用户的消息，默认所有用户
+  --prefix  监控时仅下载匹配通配符的文件名前缀
 ```
 
 ### 示例命令
@@ -83,10 +85,10 @@ python main.py download -id 1111 -user @someone --range 10..200
 python main.py upload -id 1111,2222 -path /data/files -dau Y -at "#归档"
 ```
 
-实时监控频道并在新文件出现时触发下载：
+实时监控频道并在新文件出现时触发下载，并只关注指定用户的文件：
 
 ```bash
-python main.py monit -id 3333,4444 --prefix "*.pdf"
+python main.py monit -id 3333,4444 -user @someone --prefix "*.pdf"
 ```
 
 ## 注意事项

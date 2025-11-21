@@ -40,6 +40,8 @@ def build_parser():
 
     monit_parser = subparsers.add_parser('monit', help='监控频道')
     monit_parser.add_argument('-id', required=True, help='频道ID，多个频道用逗号分隔')
+    monit_parser.add_argument('-user', help='只监控指定用户的消息，默认监控全部用户', default=None)
+    monit_parser.add_argument('--prefix', help='仅下载匹配通配符的文件名前缀', default=None)
 
     return parser
 
@@ -143,7 +145,7 @@ async def handle_monit(client: TelegramClient, args):
     监控频道，持续运行直到手动停止
     """
     channel_ids = args.id.split(',')
-    await StartMonit(client, channel_ids)
+    await StartMonit(client, channel_ids, from_user=args.user, prefix=args.prefix)
     await client.run_until_disconnected()
 
 def main():
