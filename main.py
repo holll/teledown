@@ -61,8 +61,8 @@ def parse_alias(alias_raw: Optional[str]) -> Dict[str, str]:
         return {}
 
     alias_map: Dict[str, str] = {}
-    for item in alias_raw.split(','):
-        item = item.strip()
+    # 允许用逗号、分号或换行分隔多个 alias，方便在 .env 中编写
+    for item in [part.strip() for part in alias_raw.replace('\n', ',').replace(';', ',').split(',')]:
         if not item:
             continue
         if ':' not in item:
