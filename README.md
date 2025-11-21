@@ -5,23 +5,28 @@
 ## 使用教程
 
 1. 克隆或下载本项目代码。
-2. 将 `config.example.json` 重命名为 `config.json` 并按下文说明填写。
+2. 将 `.env.example` 复制为 `.env` 并按下文说明填写。
 3. 创建并激活 Python 3 虚拟环境（可选，但推荐）。
 4. 安装依赖 [教程](#jump2)。
 5. 阅读命令行参数的作用 [教程](#jump3)，并按示例运行。
 
 ## 配置文件解释<a id="jump1"></a>
 
-```json
-{
-  "api_id": "参见下方教程",
-  "api_hash": "参见下方教程",
-  "phone": "手机号（与 bot_token 任填一项）",
-  "bot_token": "机器人登录 Token（与 phone 二选一）",
-  "save_path": "下载文件的保存路径",
-  "proxy": "可选，形如 user:pass@ip:port 或 ip:port",
-  "alias": { "-100123456": "给指定频道设置显示名" }
-}
+```
+# 必填：在 https://my.telegram.org 获取后填写
+API_ID=参见下方教程
+API_HASH=参见下方教程
+
+# 账号登录方式（手机号与机器人 Token 二选一填写，另一项留空）
+PHONE=手机号
+BOT_TOKEN=
+
+# 下载配置
+SAVE_PATH=下载文件的保存路径
+PROXY=可选，形如 user:pass@ip:port 或 ip:port
+
+# 给频道设置显示名，多个用逗号分隔，格式 chat_id:别名
+ALIAS=-100123456:给指定频道设置显示名
 ```
 
 ### 获取 api_id 和 api_hash
@@ -57,7 +62,7 @@ pip3 install python-magic-bin==0.4.14
 CLI 已改为子命令模式，先选择操作类型，再填写对应参数：
 
 ```
-python main.py [-c config.json] [--proxy user:pass@ip:port]
+python main.py [-c .env] [--proxy user:pass@ip:port]
                {refresh,hook,download,upload,print,monit} ...
 
 子命令 refresh：刷新缓存，打印所有频道信息
@@ -84,7 +89,7 @@ python main.py [-c config.json] [--proxy user:pass@ip:port]
 
 ```bash
 # 复制配置模版并填写 api_id / api_hash 以及 phone 或 bot_token（二选一）
-cp config.example.json config.json
+cp .env.example .env
 
 # 安装依赖（建议在虚拟环境内执行）
 pip3 install -r requirements.txt

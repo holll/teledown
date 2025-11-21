@@ -1,10 +1,10 @@
 import argparse
-import json
 import os
 import sys
-from typing import Optional
+from typing import Dict, Optional
 
 from telethon import TelegramClient
+from dotenv import dotenv_values
 from tools.down_file import down_group
 from tools.monit import StartMonit
 from tools.tool import Hook, initDb, md5, print_all_channel, print_group
@@ -15,7 +15,7 @@ def build_parser():
     """构建命令行解析器，使用子命令简化分支判断。"""
 
     parser = argparse.ArgumentParser(description="基于 Telethon 的 Telegram 管理工具")
-    parser.add_argument('-c', '--config', default='config.json', help='配置文件路径，默认config.json')
+    parser.add_argument('-c', '--config', default='.env', help='配置文件路径，默认.env')
     parser.add_argument('--proxy', help='代理地址，支持格式：user:pass@ip:port 或 ip:port')
 
     subparsers = parser.add_subparsers(dest='command', required=True, help='选择要执行的功能')
@@ -46,18 +46,47 @@ def build_parser():
     return parser
 
 
-def load_config(config_path: str):
-    """读取配置文件并处理常见错误。"""
-
+def parse_int(value: Optional[str], field_name: str) -> Optional[int]:
+    if value is None or value == '':
+        return None
     try:
-        with open(config_path, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    except FileNotFoundError:
+        return int(value)
+    except ValueError:
+        print(f"配置项 {field_name} 需要为整数，请检查 .env")
+        sys.exit(1)
+
+
+def parse_alias(alias_raw: Optional[str]) -> Dict[str, str]:
+    if not alias_raw:
+        return {}
+
+    alias_map: Dict[str, str] = {}
+    for item in alias_raw.split(','):
+        item = item.strip()
+        if not item:
+            continue
+        if ':' not in item:
+            print(f"别名配置 \"{item}\" 无效，需使用 chat_id:别名 的形式")
+            sys.exit(1)
+        chat_id, title = item.split(':', 1)
+        if chat_id and title:
+            alias_map[chat_id.strip()] = title.strip()
+    return alias_map
+
+
+def load_config(config_path: str):
+    """读取 .env 配置文件并处理常见错误。"""
+
+    if not os.path.exists(config_path):
         print(f"配置文件 {config_path} 不存在，请检查路径")
         sys.exit(1)
-    except json.JSONDecodeError:
-        print(f"配置文件 {config_path} 格式错误，请检查JSON语法")
+
+    raw_config = dotenv_values(config_path)
+    if not raw_config:
+        print(f"配置文件 {config_path} 为空或无法解析，请检查内容")
         sys.exit(1)
+
+    return {k.lower(): v for k, v in raw_config.items() if v is not None}
 
 
 def prepare_proxy(proxy: Optional[str]):
@@ -156,11 +185,15 @@ def main():
     # ================= 读取配置文件 =================
     config = load_config(args.config)
 
-    api_id = config.get('api_id')
+    api_id = parse_int(config.get('api_id'), 'api_id')
     api_hash = config.get('api_hash')
     phone = config.get('phone')
     bot_token = config.get('bot_token')
-    alias = config.get('alias')
+    alias = parse_alias(config.get('alias'))
+
+    if not api_id or not api_hash:
+        print('请在 .env 中填写 api_id 与 api_hash')
+        sys.exit(1)
 
     # 检查登录方式：手机号登录 或 机器人Token登录，只能二选一
     ensure_login_method(phone, bot_token)
@@ -170,8 +203,7 @@ def main():
 
     if alias:
         for key, val in alias.items():
-            if key and val:
-                os.environ[key] = val
+            os.environ[key] = val
 
     # 设置保存文件路径环境变量
     os.environ['save_path'] = config.get('save_path', '')
