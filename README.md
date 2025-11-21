@@ -57,6 +57,38 @@ python main.py [-c config.json] [--proxy user:pass@ip:port]
   -id     频道ID，多个频道用逗号分隔
 ```
 
+### 示例命令
+
+刷新缓存并打印所有频道信息：
+
+```bash
+python main.py refresh
+```
+
+下载两个频道的全部文件，并只保留文件名前缀为 `report` 的文件：
+
+```bash
+python main.py download -id 123456789|https://t.me/example_channel/1 --prefix "report*"
+```
+
+仅下载指定用户的消息范围，示例中下载 `@someone` 在频道 1111 里的消息 10~200：
+
+```bash
+python main.py download -id 1111 -user @someone --range 10..200
+```
+
+上传本地目录的文件到多个频道并在完成后删除源文件：
+
+```bash
+python main.py upload -id 1111,2222 -path /data/files -dau Y -at "#归档"
+```
+
+实时监控频道并在新文件出现时触发下载：
+
+```bash
+python main.py monit -id 3333,4444 --prefix "*.pdf"
+```
+
 ## 注意事项
 
 1. 如果你想下载速度更快，`pip3 install cryptg `
