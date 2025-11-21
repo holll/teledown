@@ -33,17 +33,28 @@ https://www.jianshu.com/p/3d047c7516cf
 
 ## 可选参数<a id="jump3"></a>
 
+CLI 已改为子命令模式，先选择操作类型，再填写对应参数：
+
 ```
-  -re 刷新缓存（程序会把用户数据缓存到本地，bot不可用）
-  -c 指定配置文件，多用户可通过不同配置文件实现切换登录
-  -up 上传文件（与-down、-print互斥）
-  -down 下载文件（与-up、-print互斥）
-  -print 打印加入的所有频道（与-up、-down互斥）
-  -id 群组/频道/用户 的 id/用户名
-  -user 批量下载频道/群组资源时只下载指定用户，格式@xxx
-  --path 上传本地文件（夹）的路径
-  -dau 上传完成后是否删除源文件(DeleteAfterUpload->DAU)
-  -at 上传时描述增加Tag，无需带#（AddTag->AT）
+python main.py [-c config.json] [--proxy user:pass@ip:port]
+               {refresh,hook,download,upload,print,monit} ...
+
+子命令 refresh：刷新缓存，打印所有频道信息
+子命令 hook：执行自定义 Hook 功能
+子命令 download：
+  -id     频道ID，多个频道用|或,分隔；支持 https://t.me/xxx/123 链接
+  -user   指定下载的用户，默认下载所有用户
+  --range 下载范围，默认">0"表示所有消息
+  --prefix 通配符，文件名前缀
+子命令 upload：
+  -id     频道ID，多个频道用|或,分隔
+  -path   上传文件路径
+  -dau    上传完成后是否删除源文件（Y/N），默认N
+  -at     上传时增加的标签
+子命令 print：
+  -id     频道ID，多个频道用|或,分隔
+子命令 monit：
+  -id     频道ID，多个频道用逗号分隔
 ```
 
 ## 注意事项
