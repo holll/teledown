@@ -4,11 +4,11 @@
 
 ## 使用教程
 
-1. 下载本项目
-2. 将config.example.json重命名为config.json
-3. 填写配置文件 [教程](#jump1)
-4. 安装依赖 [教程](#jump2)
-5. 阅读命令行参数的作用 [教程](#jump3)
+1. 克隆或下载本项目代码。
+2. 将 `config.example.json` 重命名为 `config.json` 并按下文说明填写。
+3. 创建并激活 Python 3 虚拟环境（可选，但推荐）。
+4. 安装依赖 [教程](#jump2)。
+5. 阅读命令行参数的作用 [教程](#jump3)，并按示例运行。
 
 ## 配置文件解释<a id="jump1"></a>
 
@@ -16,20 +16,41 @@
 {
   "api_id": "参见下方教程",
   "api_hash": "参见下方教程",
-  "save_path": "保存路径",
-  "proxy_port": "代理端口，不需要则直接删除此项",
-  "phone": "手机号（与bot_token任填一项）",
-  "bot_token": "机器人登录配置"
+  "phone": "手机号（与 bot_token 任填一项）",
+  "bot_token": "机器人登录 Token（与 phone 二选一）",
+  "save_path": "下载文件的保存路径",
+  "proxy": "可选，形如 user:pass@ip:port 或 ip:port",
+  "alias": { "-100123456": "给指定频道设置显示名" }
 }
 ```
 
-### 获取api_id和api_hash
+### 获取 api_id 和 api_hash
 
-https://www.jianshu.com/p/3d047c7516cf
+可参考 https://www.jianshu.com/p/3d047c7516cf ，在 https://my.telegram.org 申请后填写到配置中。
 
 ## 依赖安装教程<a id="jump2"></a>
 
-执行`pip3 install -r requirements.txt`
+基础运行环境：Python 3.8+。
+
+1. 安装基础依赖（必需）
+
+```bash
+pip3 install -r requirements.txt
+```
+
+2. 如果需要开启代理参数 `--proxy`，请确保安装了 `python-socks`（已包含在 `requirements.txt`）。
+
+3. 上传功能需要的附加依赖（可选）：
+
+```bash
+pip3 install -r requirements_upload.txt
+# Linux 安装 python-magic
+pip3 install python-magic
+# Windows 安装 python-magic-bin
+pip3 install python-magic-bin==0.4.14
+```
+
+4. 如果希望更快的下载速度，建议额外安装 `cryptg`（已列在 `requirements.txt`，若未自动安装请手动执行 `pip3 install cryptg`）。
 
 ## 可选参数<a id="jump3"></a>
 
@@ -57,6 +78,19 @@ python main.py [-c config.json] [--proxy user:pass@ip:port]
   -id     频道ID，多个频道用逗号分隔
   -user   仅监控指定用户的消息，支持用逗号或|分隔多个用户，默认所有用户
   --prefix  监控时仅下载匹配通配符的文件名前缀
+```
+
+快速开始：
+
+```bash
+# 复制配置模版并填写 api_id / api_hash 以及 phone 或 bot_token（二选一）
+cp config.example.json config.json
+
+# 安装依赖（建议在虚拟环境内执行）
+pip3 install -r requirements.txt
+
+# 首次运行会引导输入验证码或二步验证密码
+python main.py refresh
 ```
 
 ### 示例命令
