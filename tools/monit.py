@@ -12,18 +12,22 @@ async def StartMonit(client: TelegramClient, channel_ids: [str], from_user=None,
         channels.append(channel.id)
         channel_title_map[channel.id] = await GetChatTitle(client, channel.id)
 
-    target_user_id = None
+    target_user_ids = set()
     if from_user:
-        if str(from_user).isdecimal():
-            target_user_id = int(from_user)
-        else:
-            user = await client.get_entity(from_user)
-            target_user_id = user.id
+        for user_ref in str(from_user).replace('|', ',').split(','):
+            user_ref = user_ref.strip()
+            if not user_ref:
+                continue
+            if user_ref.isdecimal():
+                target_user_ids.add(int(user_ref))
+                continue
+            user = await client.get_entity(user_ref)
+            target_user_ids.add(user.id)
 
     @client.on(events.NewMessage(chats=channels))
     async def event_handler(event):
         sender_id = event.message.sender_id
-        if target_user_id is not None and sender_id != target_user_id:
+        if target_user_ids and sender_id not in target_user_ids:
             return
 
         chat_id = event.chat_id

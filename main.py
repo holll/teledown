@@ -40,7 +40,7 @@ def build_parser():
 
     monit_parser = subparsers.add_parser('monit', help='监控频道')
     monit_parser.add_argument('-id', required=True, help='频道ID，多个频道用逗号分隔')
-    monit_parser.add_argument('-user', help='只监控指定用户的消息，默认监控全部用户', default=None)
+    monit_parser.add_argument('-user', help='只监控指定用户的消息，支持用逗号或|分隔多个用户', default=None)
     monit_parser.add_argument('--prefix', help='仅下载匹配通配符的文件名前缀', default=None)
 
     return parser
