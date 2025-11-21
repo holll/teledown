@@ -38,7 +38,7 @@
 pip3 install -r requirements.txt
 ```
 
-2. 如果需要开启代理参数 `--proxy`，请确保安装了 `python-socks`（已包含在 `requirements.txt`）。
+2. 如果需要开启代理参数 `--proxy`，请额外安装 `python-socks`（可按需手动执行 `pip3 install python-socks`）。
 
 3. 上传功能需要的附加依赖（可选）：
 
