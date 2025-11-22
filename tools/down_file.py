@@ -36,7 +36,7 @@ def GetFileSuffix(message) -> list:
     return mime_type.split('/')
 
 
-async def download_file(client: TelegramClient, channel_title, channel_id, message, prefix, old=False):
+async def download_file(client: TelegramClient, channel_title, channel_id, message, prefix=None, old=False):
     message_time = message.date
     formatted_time = datetime.strftime(message_time, '%Y_%m')
 
