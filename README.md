@@ -73,7 +73,7 @@ python main.py [-c .env] [--proxy user:pass@ip:port]
 子命令 hook：执行自定义 Hook 功能
 子命令 download：
   -id     频道ID，多个频道用|或,分隔；支持 https://t.me/xxx/123 链接
-  -user   指定下载的用户，默认下载所有用户
+  -user   指定下载的用户，支持用逗号或|分隔多个用户名/ID，默认下载所有用户
   --range 下载范围，默认">0"表示所有消息
   --prefix 通配符，文件名前缀
 子命令 upload：
@@ -119,7 +119,7 @@ python main.py download -id 123456789|https://t.me/example_channel/1 --prefix "r
 仅下载指定用户的消息范围，示例中下载 `@someone` 在频道 1111 里的消息 10~200：
 
 ```bash
-python main.py download -id 1111 -user @someone --range 10..200
+python main.py download -id 1111 -user @someone,@another --range 10..200
 ```
 
 上传本地目录的文件到多个频道并在完成后删除源文件：

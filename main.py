@@ -25,7 +25,7 @@ def build_parser():
 
     download_parser = subparsers.add_parser('download', help='下载文件')
     download_parser.add_argument('-id', required=True, help='频道ID，多个频道用|或,分隔')
-    download_parser.add_argument('-user', help='指定下载的用户，默认下载所有用户', default=None)
+    download_parser.add_argument('-user', help='指定下载的用户，支持用逗号或|分隔多个用户，默认下载所有用户', default=None)
     download_parser.add_argument('--range', default='>0', help='下载范围，默认">0"表示所有消息')
     download_parser.add_argument('--prefix', help='通配符，文件名前缀', default=None)
 
