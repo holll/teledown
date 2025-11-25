@@ -7,7 +7,7 @@ from telethon import TelegramClient
 from telethon.errors import FileReferenceExpiredError
 from telethon.tl.types import MessageMediaDocument, MessageMediaPhoto, DocumentAttributeSticker
 
-from tools.tool import GetFileName, getHistoryMessage, GetChatId, match_wildcard
+from tools.tool import GetFileName, getHistoryMessage, GetChatId, match_wildcard, parse_user_ids
 from tools.tqdm import TqdmUpTo
 
 
@@ -36,7 +36,7 @@ def GetFileSuffix(message) -> list:
     return mime_type.split('/')
 
 
-async def download_file(client: TelegramClient, channel_title, channel_id, message, prefix, old=False):
+async def download_file(client: TelegramClient, channel_title, channel_id, message, prefix=None, old=False):
     message_time = message.date
     formatted_time = datetime.strftime(message_time, '%Y_%m')
 
@@ -78,7 +78,8 @@ async def download_file(client: TelegramClient, channel_title, channel_id, messa
 
 async def down_group(client: TelegramClient, chat_id, plus_func: str, from_user, prefix):
     chat_id = await GetChatId(client, chat_id)
-    channel_title, messages = await getHistoryMessage(client, chat_id, plus_func, from_user=from_user)  # messages是倒序的
+    target_user_ids = await parse_user_ids(client, from_user)
+    channel_title, messages = await getHistoryMessage(client, chat_id, plus_func, from_user_ids=target_user_ids)  # messages是倒序的
     async for message in messages:
         """转发消息
         await message.forward_to('me')

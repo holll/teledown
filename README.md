@@ -4,46 +4,134 @@
 
 ## 使用教程
 
-1. 下载本项目
-2. 将config.example.json重命名为config.json
-3. 填写配置文件 [教程](#jump1)
-4. 安装依赖 [教程](#jump2)
-5. 阅读命令行参数的作用 [教程](#jump3)
+1. 克隆或下载本项目代码。
+2. 将 `.env.example` 复制为 `.env` 并按下文说明填写。
+3. 创建并激活 Python 3 虚拟环境（可选，但推荐）。
+4. 安装依赖 [教程](#jump2)。
+5. 阅读命令行参数的作用 [教程](#jump3)，并按示例运行。
 
 ## 配置文件解释<a id="jump1"></a>
 
-```json
-{
-  "api_id": "参见下方教程",
-  "api_hash": "参见下方教程",
-  "save_path": "保存路径",
-  "proxy_port": "代理端口，不需要则直接删除此项",
-  "phone": "手机号（与bot_token任填一项）",
-  "bot_token": "机器人登录配置"
-}
+```
+# 必填：在 https://my.telegram.org 获取后填写
+API_ID=参见下方教程
+API_HASH=参见下方教程
+
+# 账号登录方式（手机号与机器人 Token 二选一填写，另一项留空）
+PHONE=手机号
+BOT_TOKEN=
+
+# 下载配置
+SAVE_PATH=下载文件的保存路径
+PROXY=可选，形如 user:pass@ip:port 或 ip:port
+
+# 给频道设置显示名，多个用逗号/分号/换行分隔，格式 chat_id:别名
+# ALIAS=-100123456:频道A,-100987654:频道B
+# 也可以写成多行（需用引号包裹）：
+# ALIAS="-100123456:频道A
+# -100987654:频道B"
+ALIAS=-100123456:给指定频道设置显示名
 ```
 
-### 获取api_id和api_hash
+### 获取 api_id 和 api_hash
 
-https://www.jianshu.com/p/3d047c7516cf
+可参考 https://www.jianshu.com/p/3d047c7516cf ，在 https://my.telegram.org 申请后填写到配置中。
 
 ## 依赖安装教程<a id="jump2"></a>
 
-执行`pip3 install -r requirements.txt`
+基础运行环境：Python 3.8+。
+
+1. 安装基础依赖（必需）
+
+```bash
+pip3 install -r requirements.txt
+```
+
+2. 如果需要开启代理参数 `--proxy`，请额外安装 `python-socks`（可按需手动执行 `pip3 install python-socks`）。
+
+3. 上传功能需要的附加依赖（可选）：
+
+```bash
+pip3 install -r requirements_upload.txt
+# Linux 安装 python-magic
+pip3 install python-magic
+# Windows 安装 python-magic-bin
+pip3 install python-magic-bin==0.4.14
+```
+
+4. 如果希望更快的下载速度，建议额外安装 `cryptg`（已列在 `requirements.txt`，若未自动安装请手动执行 `pip3 install cryptg`）。
 
 ## 可选参数<a id="jump3"></a>
 
+CLI 已改为子命令模式，先选择操作类型，再填写对应参数：
+
 ```
-  -re 刷新缓存（程序会把用户数据缓存到本地，bot不可用）
-  -c 指定配置文件，多用户可通过不同配置文件实现切换登录
-  -up 上传文件（与-down、-print互斥）
-  -down 下载文件（与-up、-print互斥）
-  -print 打印加入的所有频道（与-up、-down互斥）
-  -id 群组/频道/用户 的 id/用户名
-  -user 批量下载频道/群组资源时只下载指定用户，格式@xxx
-  --path 上传本地文件（夹）的路径
-  -dau 上传完成后是否删除源文件(DeleteAfterUpload->DAU)
-  -at 上传时描述增加Tag，无需带#（AddTag->AT）
+python main.py [-c .env] [--proxy user:pass@ip:port]
+               {refresh,hook,download,upload,print,monit} ...
+
+子命令 refresh：刷新缓存，打印所有频道信息
+子命令 hook：执行自定义 Hook 功能
+子命令 download：
+  -id     频道ID，多个频道用|或,分隔；支持 https://t.me/xxx/123 链接
+  -user   指定下载的用户，支持用逗号或|分隔多个用户名/ID，默认下载所有用户
+  --range 下载范围，默认">0"表示所有消息
+  --prefix 通配符，文件名前缀
+子命令 upload：
+  -id     频道ID，多个频道用|或,分隔
+  -path   上传文件路径
+  -dau    上传完成后是否删除源文件（Y/N），默认N
+  -at     上传时增加的标签
+子命令 print：
+  -id     频道ID，多个频道用|或,分隔
+子命令 monit：
+  -id     频道ID，多个频道用逗号分隔
+  -user   仅监控指定用户的消息，支持用逗号或|分隔多个用户，默认所有用户
+  --prefix  监控时仅下载匹配通配符的文件名前缀
+```
+
+快速开始：
+
+```bash
+# 复制配置模版并填写 api_id / api_hash 以及 phone 或 bot_token（二选一）
+cp .env.example .env
+
+# 安装依赖（建议在虚拟环境内执行）
+pip3 install -r requirements.txt
+
+# 首次运行会引导输入验证码或二步验证密码
+python main.py refresh
+```
+
+### 示例命令
+
+刷新缓存并打印所有频道信息：
+
+```bash
+python main.py refresh
+```
+
+下载两个频道的全部文件，并只保留文件名前缀为 `report` 的文件：
+
+```bash
+python main.py download -id 123456789|https://t.me/example_channel/1 --prefix "report*"
+```
+
+仅下载指定用户的消息范围，示例中下载 `@someone` 在频道 1111 里的消息 10~200：
+
+```bash
+python main.py download -id 1111 -user @someone,@another --range 10..200
+```
+
+上传本地目录的文件到多个频道并在完成后删除源文件：
+
+```bash
+python main.py upload -id 1111,2222 -path /data/files -dau Y -at "#归档"
+```
+
+实时监控频道并在新文件出现时触发下载，并只关注指定用户的文件（多个用户用逗号分隔）：
+
+```bash
+python main.py monit -id 3333,4444 -user @someone,@another --prefix "*.pdf"
 ```
 
 ## 注意事项
