@@ -56,7 +56,8 @@ async def parse_user_ids(client: TelegramClient, user_refs) -> set[int]:
     return target_ids
 
 
-async def getHistoryMessage(client: TelegramClient, chat_id: int, plus_func=Union[None, str], from_user_ids: Union[None, set[int]] = None):
+async def getHistoryMessage(client: TelegramClient, chat_id: int, plus_func=Union[None, str],
+                            from_user_ids: Union[None, set[int]] = None):
     channel_title = await GetChatTitle(client, chat_id)
     filter_user = None
     if from_user_ids:
@@ -67,6 +68,7 @@ async def getHistoryMessage(client: TelegramClient, chat_id: int, plus_func=Unio
         async for message in messages:
             if not from_user_ids or message.sender_id in from_user_ids:
                 yield message
+
     # Todo 根据plus_func获取指定消息区间
     if plus_func is not None:
         filterFunc = plus_func[:1]

@@ -1,0 +1,5 @@
+[
+  {"bot":"@abcbot","action":"send","text":"/qd"},
+  {"bot":"@abcbot","action":"send","text":"打卡"},
+  {"bot":"@abcbot","action":"click","text":"/start","button_text":"签到"}
+]

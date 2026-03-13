@@ -12,6 +12,7 @@ Pipfile*
 # config
 *.json
 !config.example.*
+!*.example.*
 *.session
 
 # Distribution / packaging
@@ -135,3 +136,4 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+*.csv

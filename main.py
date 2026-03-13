@@ -3,10 +3,12 @@ import os
 import sys
 from typing import Dict, Optional
 
-from telethon import TelegramClient
 from dotenv import dotenv_values
+from telethon import TelegramClient
+
 from tools.down_file import down_group
 from tools.monit import StartMonit
+from tools.sign import batch_sign
 from tools.tool import Hook, initDb, md5, print_all_channel, print_group
 from tools.upload_file import upload_file
 
@@ -21,18 +23,21 @@ def build_parser():
     subparsers = parser.add_subparsers(dest='command', required=True, help='选择要执行的功能')
 
     subparsers.add_parser('refresh', help='刷新缓存，打印所有频道信息')
+    subparsers.add_parser('sign', help='签到')
     subparsers.add_parser('hook', help='执行自定义 Hook 功能')
 
     download_parser = subparsers.add_parser('download', help='下载文件')
     download_parser.add_argument('-id', required=True, help='频道ID，多个频道用|或,分隔')
-    download_parser.add_argument('-user', help='指定下载的用户，支持用逗号或|分隔多个用户，默认下载所有用户', default=None)
+    download_parser.add_argument('-user', help='指定下载的用户，支持用逗号或|分隔多个用户，默认下载所有用户',
+                                 default=None)
     download_parser.add_argument('--range', default='>0', help='下载范围，默认">0"表示所有消息')
     download_parser.add_argument('--prefix', help='通配符，文件名前缀', default=None)
 
     upload_parser = subparsers.add_parser('upload', help='上传文件')
     upload_parser.add_argument('-id', help='频道ID，多个频道用|或,分隔')
     upload_parser.add_argument('-path', required=True, help='上传文件路径')
-    upload_parser.add_argument('-dau', default='N', choices=['y', 'Y', 'n', 'N'], help='上传完成后是否删除源文件（Y/N），默认N')
+    upload_parser.add_argument('-dau', default='N', choices=['y', 'Y', 'n', 'N'],
+                               help='上传完成后是否删除源文件（Y/N），默认N')
     upload_parser.add_argument('-at', '--addtag', help='上传时增加的标签')
 
     print_parser = subparsers.add_parser('print', help='打印消息')
@@ -131,6 +136,7 @@ async def show_info(client: TelegramClient):
     print("ID:", me.id)
     print("-----login successful-----")
 
+
 # ================= 各功能处理函数 =================
 async def handle_refresh(client: TelegramClient, args):
     """
@@ -138,11 +144,20 @@ async def handle_refresh(client: TelegramClient, args):
     """
     await print_all_channel(client)
 
+
 async def handle_hook(client: TelegramClient, args):
     """
     执行自定义 Hook 功能
     """
     await Hook(client)
+
+
+async def handle_sign(client: TelegramClient, args):
+    """
+    执行自定义 Hook 功能
+    """
+    await batch_sign(client)
+
 
 async def handle_download(client: TelegramClient, args):
     """
@@ -156,6 +171,7 @@ async def handle_download(client: TelegramClient, args):
     for cid in channel_id.split('|'):
         await down_group(client, cid, plus_func, args.user, args.prefix)
 
+
 async def handle_upload(client: TelegramClient, args):
     """
     上传文件到频道，支持上传路径及上传完成后删除本地文件选项
@@ -163,11 +179,13 @@ async def handle_upload(client: TelegramClient, args):
     del_after = args.dau.upper() == 'Y'
     await upload_file(client, args.id, args.path, del_after, args.addtag)
 
+
 async def handle_print(client: TelegramClient, args):
     """
     打印频道消息
     """
     await print_group(client, args.id)
+
 
 async def handle_monit(client: TelegramClient, args):
     """
@@ -176,6 +194,7 @@ async def handle_monit(client: TelegramClient, args):
     channel_ids = args.id.split(',')
     await StartMonit(client, channel_ids, from_user=args.user, prefix=args.prefix)
     await client.run_until_disconnected()
+
 
 def main():
     # ================= 参数解析 =================
@@ -219,6 +238,7 @@ def main():
     command_map = {
         'refresh': handle_refresh,
         'hook': handle_hook,
+        'sign': handle_sign,
         'download': handle_download,
         'upload': handle_upload,
         'print': handle_print,
