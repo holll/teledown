@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import random
 from dataclasses import dataclass
 from typing import Optional, Literal
 
@@ -112,5 +113,6 @@ async def run_sign_task(client: TelegramClient, task: SignTask):
 
 async def batch_sign(client: TelegramClient):
     tasks = load_sign_tasks_from_file()
+    random.shuffle(tasks)
     for task in tasks:
         await run_sign_task(client, task)
