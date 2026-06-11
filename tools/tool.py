@@ -12,7 +12,6 @@ import pandas as pd
 from telethon import TelegramClient
 from telethon.tl import types
 
-
 # 模块级频道别名缓存，替代 os.environ 做缓存
 _chat_title_cache: dict[str, str] = {}
 
@@ -63,10 +62,10 @@ async def parse_user_ids(client: TelegramClient, user_refs) -> set[int]:
 
 
 async def get_history_message(
-    client: TelegramClient,
-    chat_id: int,
-    plus_func: Optional[str] = None,
-    from_user_ids: Optional[set[int]] = None,
+        client: TelegramClient,
+        chat_id: int,
+        plus_func: Optional[str] = None,
+        from_user_ids: Optional[set[int]] = None,
 ):
     channel_title = await get_chat_title(client, chat_id)
     filter_user = None
@@ -76,7 +75,8 @@ async def get_history_message(
 
     async def filter_messages_by_user(messages):
         async for message in messages:
-            if not from_user_ids or message.sender_id in from_user_ids:
+            # Todo 疑似以当前频道or群组身份发言不会存在sender_id
+            if not from_user_ids or message.sender_id in from_user_ids or message.sender_id is None:
                 yield message
 
     if plus_func is not None:
@@ -92,10 +92,10 @@ async def get_history_message(
             specifyID = int(plus_func[1:])
             # 大于范围模式
             if filterFunc == '>':
-                messages = client.iter_messages(chat_id, min_id=specifyID, from_user=filter_user)
+                messages = client.iter_messages(chat_id, min_id=specifyID, from_user=None)
             # 小于范围模式
             elif filterFunc == '<':
-                messages = client.iter_messages(chat_id, max_id=specifyID, from_user=filter_user)
+                messages = client.iter_messages(chat_id, max_id=specifyID, from_user=None)
             else:
                 # 单选模式
                 messages = client.iter_messages(chat_id, ids=specifyID)
@@ -108,7 +108,7 @@ async def get_history_message(
                 low, high = rest.split('s', 1)
             messages = client.iter_messages(chat_id, max_id=int(high), min_id=int(low), from_user=filter_user)
     else:
-        messages = client.iter_messages(chat_id, reverse=True, min_id=1, from_user=filter_user)
+        messages = client.iter_messages(chat_id, reverse=True, min_id=1, from_user=None)
 
     return channel_title, filter_messages_by_user(messages)
 
