@@ -7,9 +7,9 @@ from dotenv import dotenv_values
 from telethon import TelegramClient
 
 from tools.down_file import down_group
-from tools.monit import StartMonit
+from tools.monit import start_monitor
 from tools.sign import batch_sign
-from tools.tool import Hook, initDb, md5, print_all_channel, print_group
+from tools.tool import run_hook, init_db, md5, print_all_channel, print_group, set_chat_alias
 from tools.upload_file import upload_file
 
 
@@ -139,33 +139,32 @@ async def show_info(client: TelegramClient):
 
 # ================= 各功能处理函数 =================
 async def handle_refresh(client: TelegramClient, args):
-    """
-    刷新缓存，打印所有频道信息
-    """
+    """刷新缓存，打印所有频道信息"""
     await print_all_channel(client)
 
 
 async def handle_hook(client: TelegramClient, args):
-    """
-    执行自定义 Hook 功能
-    """
-    await Hook(client)
+    """执行自定义 Hook 功能"""
+    await run_hook(client)
 
 
 async def handle_sign(client: TelegramClient, args):
-    """
-    执行自定义 Hook 功能
-    """
+    """执行签到功能"""
     await batch_sign(client)
 
 
 async def handle_download(client: TelegramClient, args):
-    """
-    下载频道文件，支持频道id和t.me链接，支持下载范围和用户过滤
-    """
+    """下载频道文件，支持频道id和t.me链接，支持下载范围和用户过滤"""
     if 't.me' in args.id:
-        parts = args.id.split('/')
-        channel_id, plus_func = parts[-2], '=' + parts[-1]
+        # 从链接中提取频道ID和消息ID
+        # 支持格式：https://t.me/xxx/123、https://t.me/c/CHAT_ID/MSG_ID、https://t.me/c/CHAT_ID/TOPIC_ID/MSG_ID
+        parts = [p for p in args.id.split('/') if p and p not in ('https:', 'http:', 't.me', 'c')]
+        if len(parts) >= 2:
+            channel_id = parts[0]   # 频道标识始终是第一段（用户名或数字ID），中间的话题ID自动忽略
+            plus_func = '=' + parts[-1]
+        else:
+            print(f"无法解析 t.me 链接: {args.id}")
+            return
     else:
         channel_id, plus_func = args.id, args.range
     for cid in channel_id.split('|'):
@@ -173,26 +172,20 @@ async def handle_download(client: TelegramClient, args):
 
 
 async def handle_upload(client: TelegramClient, args):
-    """
-    上传文件到频道，支持上传路径及上传完成后删除本地文件选项
-    """
+    """上传文件到频道，支持上传路径及上传完成后删除本地文件选项"""
     del_after = args.dau.upper() == 'Y'
     await upload_file(client, args.id, args.path, del_after, args.addtag)
 
 
 async def handle_print(client: TelegramClient, args):
-    """
-    打印频道消息
-    """
+    """打印频道消息"""
     await print_group(client, args.id)
 
 
 async def handle_monit(client: TelegramClient, args):
-    """
-    监控频道，持续运行直到手动停止
-    """
+    """监控频道，持续运行直到手动停止"""
     channel_ids = args.id.split(',')
-    await StartMonit(client, channel_ids, from_user=args.user, prefix=args.prefix)
+    await start_monitor(client, channel_ids, from_user=args.user, prefix=args.prefix)
     await client.run_until_disconnected()
 
 
@@ -218,21 +211,20 @@ def main():
     ensure_login_method(phone, bot_token)
 
     # 计算登录唯一标识，作为数据库名或会话名
-    md5Token = md5(phone or bot_token)
+    md5_token = md5(phone or bot_token)
 
     if alias:
-        for key, val in alias.items():
-            os.environ[key] = val
+        set_chat_alias(alias)
 
     # 设置保存文件路径环境变量
     os.environ['save_path'] = config.get('save_path', '')
 
-    # 初始化数据库（根据 md5Token 区分）
-    initDb(md5Token)
+    # 初始化数据库（根据 md5_token 区分）
+    init_db(md5_token)
 
     # ================= 代理配置 =================
     proxy = prepare_proxy(args.proxy or config.get('proxy'))
-    client = TelegramClient(md5Token, api_id, api_hash, proxy=proxy)
+    client = TelegramClient(md5_token, api_id, api_hash, proxy=proxy)
 
     # ================= 命令映射表 =================
     command_map = {

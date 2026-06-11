@@ -43,6 +43,7 @@ def load_sign_tasks_from_file() -> list[SignTask]:
 
 
 async def send_text(client: TelegramClient, bot: str, text: str):
+
     await client.send_message(bot, text)
 
 
