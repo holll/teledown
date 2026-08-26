@@ -8,6 +8,7 @@ Pipfile*
 
 # C extensions
 *.so
+*.pyd
 
 # config
 *.json
