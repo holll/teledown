@@ -83,10 +83,12 @@ jobs:
 
       # 用 gh CLI 遍历上传全部产物（find 会包含 .env.example 等隐藏文件，
       # 避免 glob 不匹配点文件导致配置模板丢失）
+      # 注：release job 未 checkout，需显式指定 GH_REPO，否则 gh 会用 git 发现仓库报 not a git repository
       - name: 上传全部产物到 Release
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
           cd artifacts
           find . -type f -print0 | while IFS= read -r -d '' f; do
