@@ -153,13 +153,23 @@ python -m PyInstaller \
     "$MAIN_FILE"
 
 # ------------------------------------------------------------
-# 附带运行时配置模板（方便分发）
+# 附带运行时配置文件（方便分发/开箱即用）
 # ------------------------------------------------------------
-for f in .env.example sign_tasks.example.json; do
-    if [ -f "$PROJECT_DIR/$f" ]; then
-        cp "$PROJECT_DIR/$f" dist/ 2>/dev/null || true
-    fi
-done
+# 始终附带配置模板
+if [ -f "$PROJECT_DIR/.env.example" ]; then
+    cp "$PROJECT_DIR/.env.example" dist/.env.example
+fi
+
+# 本地构建时若存在真实 .env，一并复制为 dist/.env 便于直接运行
+# 注意：.env 含 API 凭据，勿将 dist 对外分发
+if [ -f "$PROJECT_DIR/.env" ]; then
+    cp "$PROJECT_DIR/.env" dist/.env
+    echo "[!] 已复制本地 .env 到 dist/.env（含凭据，仅供个人使用，勿对外分发）"
+fi
+
+if [ -f "$PROJECT_DIR/sign_tasks.example.json" ]; then
+    cp "$PROJECT_DIR/sign_tasks.example.json" dist/sign_tasks.example.json
+fi
 
 echo "================ 打包完成 ================"
 echo "生成文件在 dist/$OUTPUT_NAME"
