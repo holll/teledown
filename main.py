@@ -107,7 +107,7 @@ def prepare_proxy(proxy: Optional[str]):
     if '@' in proxy:
         # 解析代理中的认证信息 username:password@ip:port
         user_pass, ip_port = proxy.split('@')
-        username, password = user_pass.split(':')
+        username, password = user_pass.split(':', 1)
     addr, port = ip_port.rsplit(':', 1)
     return {
         'proxy_type': python_socks.ProxyType.SOCKS5,

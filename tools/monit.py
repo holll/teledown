@@ -8,7 +8,12 @@ async def start_monitor(client: TelegramClient, channel_ids: list[str], from_use
     channels = []
     channel_title_map = {}
     for channel_id in channel_ids:
-        channel = await client.get_entity(int(channel_id))
+        try:
+            cid = int(channel_id) if channel_id.lstrip('-').isdigit() else channel_id
+            channel = await client.get_entity(cid)
+        except Exception as e:
+            print(f"无法获取频道 {channel_id}: {e}")
+            continue
         channels.append(channel.id)
         channel_title_map[channel.id] = await get_chat_title(client, channel.id)
 
@@ -25,6 +30,6 @@ async def start_monitor(client: TelegramClient, channel_ids: list[str], from_use
         message = event.message
         if message.media is not None:
             await download_file(client, channel_title, chat_id, message, prefix=prefix)
-        else:
+        elif message.message:
             content = f'From:{channel_title}\n{message.message}'
             await client.send_message(entity='me', message=content)

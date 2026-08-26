@@ -18,6 +18,9 @@ async def upload_file(client: TelegramClient, chat_id, path: str, del_after_uplo
     except ModuleNotFoundError:
         from moviepy.video.io.VideoFileClip import VideoFileClip
 
+    if not chat_id:
+        print("上传目标频道ID未指定")
+        return
     isId = re.match(r'-?[1-9][0-9]{4,}', chat_id)
     isDir = os.path.isdir(path)
     if isId:
@@ -75,7 +78,7 @@ async def upload_file(client: TelegramClient, chat_id, path: str, del_after_uplo
                     caption=filename_without_ext if addtag is None else str2join(f'#{addtag} ', filename_without_ext),
                     thumb=thumb_input,
                     progress_callback=bar.update_to,
-                    attributes=[video_attr])
+                    attributes=[video_attr] if video_attr else None)
                 if del_after_upload:
                     os.remove(file_path)
             except Exception:

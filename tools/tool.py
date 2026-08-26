@@ -56,8 +56,11 @@ async def parse_user_ids(client: TelegramClient, user_refs) -> set[int]:
         if user_ref.isdecimal():
             target_ids.add(int(user_ref))
             continue
-        entity = await client.get_entity(user_ref)
-        target_ids.add(entity.id)
+        try:
+            entity = await client.get_entity(user_ref)
+            target_ids.add(entity.id)
+        except Exception as e:
+            print(f"无法解析用户 {user_ref}: {e}")
     return target_ids
 
 
@@ -156,7 +159,7 @@ def get_file_id(message) -> str:
 
 def get_file_name(message) -> str:
     """从消息中提取文件名，优先级：原始文件名 > 消息文本描述 > 文件 ID。"""
-    if message.file.name:
+    if message.file and message.file.name:
         return message.file.name
 
     # 统一 JPEG 变体后缀

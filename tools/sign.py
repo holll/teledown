@@ -28,18 +28,28 @@ def load_sign_tasks_from_file() -> list[SignTask]:
 
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
-    return [
-        SignTask(
+
+    if not isinstance(data, list):
+        raise RuntimeError(f"签到配置文件格式错误，应为 JSON 数组: {path}")
+
+    tasks = []
+    for i, item in enumerate(data):
+        if not isinstance(item, dict) or "bot" not in item or "action" not in item:
+            raise RuntimeError(f"签到任务 #{i + 1} 缺少必要字段 bot 或 action")
+        try:
+            delay = float(item.get("delay", 1.5))
+        except (TypeError, ValueError):
+            raise RuntimeError(f"签到任务 #{i + 1} 的 delay 不是有效数字: {item.get('delay')!r}")
+        tasks.append(SignTask(
             bot=item["bot"],
             action=item["action"],
             text=item.get("text"),
             button_text=item.get("button_text"),
             row=item.get("row"),
             col=item.get("col"),
-            delay=float(item.get("delay", 1.5)),
-        )
-        for item in data
-    ]
+            delay=delay,
+        ))
+    return tasks
 
 
 async def send_text(client: TelegramClient, bot: str, text: str):
@@ -61,7 +71,8 @@ async def click_button_by_text(client: TelegramClient, bot: str, button_text: st
             continue
         for r, row_buttons in enumerate(msg.buttons):
             for c, button in enumerate(row_buttons):
-                if button_text in getattr(button, "text", None):
+                btn_text = getattr(button, "text", None)
+                if btn_text and button_text in btn_text:
                     await msg.click(r, c)
                     return
     raise ValueError(f"未找到按钮: {button_text} in {bot}")
@@ -114,6 +125,7 @@ async def run_sign_task(client: TelegramClient, task: SignTask):
 
 async def batch_sign(client: TelegramClient):
     tasks = load_sign_tasks_from_file()
-    random.shuffle(tasks)
-    for task in tasks:
+    shuffled = tasks.copy()
+    random.shuffle(shuffled)
+    for task in shuffled:
         await run_sign_task(client, task)

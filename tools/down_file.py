@@ -1,4 +1,6 @@
 import os
+import sys
+from asyncio import CancelledError
 from datetime import datetime
 
 from telethon import TelegramClient
@@ -41,7 +43,7 @@ async def download_file(client: TelegramClient, channel_title, channel_id, messa
     file_name = get_file_name(message)
     if not match_wildcard(prefix, file_name):
         return
-    file_path = os.path.join(os.environ["save_path"], f'{channel_title}-{channel_id}', file_name)
+    file_path = os.path.join(os.environ.get("save_path", ""), f'{channel_title}-{channel_id}', file_name)
     file_size = message.file.size
     ret, file_path = file_exist(file_path, file_size)
     if ret:
@@ -53,15 +55,14 @@ async def download_file(client: TelegramClient, channel_title, channel_id, messa
 
     for attempt in range(2):  # 最多尝试 2 次
         try:
-            from asyncio import CancelledError
             with TqdmUpTo(total=file_size, bar_format=TqdmUpTo.bar_format, desc=file_name[:10]) as bar:
                 await message.download_media(download_path, progress_callback=bar.update_to)
             os.rename(download_path, file_path)
             return
         except CancelledError:
             print("取消下载")
-            os.remove(download_path)
-            import sys
+            if os.path.exists(download_path):
+                os.remove(download_path)
             sys.exit()
         except FileReferenceExpiredError:
             if attempt == 1:
@@ -73,9 +74,15 @@ async def download_file(client: TelegramClient, channel_title, channel_id, messa
             async for newMessage in newMessages:
                 message = newMessage
                 break
+        except KeyboardInterrupt:
+            print("用户中断下载")
+            if os.path.exists(download_path):
+                os.remove(download_path)
+            raise
         except Exception as e:
             print("下载出错", e.__class__.__name__)
-            os.remove(download_path)
+            if os.path.exists(download_path):
+                os.remove(download_path)
             return
 
 
