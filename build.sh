@@ -10,7 +10,7 @@ set -e
 # 兼容：Linux / macOS / Windows(Git Bash / MSYS2)
 #
 # 可通过环境变量覆盖默认配置：
-#   OUTPUT_NAME   输出文件名，默认 teledown
+#   OUTPUT_NAME   输出文件名前缀，默认 teledown（最终名：前缀-平台-架构）
 #   PYTHON        python 解释器，默认 python
 #   KEEP_COMPILED 置 1 时保留 Cython 编译产物（*.so/*.pyd）
 # ============================================================
@@ -32,6 +32,18 @@ case "$UNAME_S" in
     *)            OS_NAME=linux ;;
 esac
 echo "[*] 检测到操作系统: $OS_NAME"
+
+# 识别架构
+MACHINE="$(uname -m)"
+case "$MACHINE" in
+    x86_64|amd64)  ARCH="x86_64" ;;
+    aarch64|arm64) ARCH="arm64" ;;
+    *)             ARCH="$MACHINE" ;;
+esac
+echo "[*] 检测到架构: $ARCH"
+
+# 产物名 = 程序名-平台-架构（Windows 下 PyInstaller 会自动追加 .exe）
+FINAL_NAME="${OUTPUT_NAME}-${OS_NAME}-${ARCH}"
 
 cd "$PROJECT_DIR"
 
@@ -146,7 +158,7 @@ python -m PyInstaller \
     --clean \
     --noconfirm \
     --onefile \
-    --name "$OUTPUT_NAME" \
+    --name "$FINAL_NAME" \
     "${HIDDEN_ARGS[@]}" \
     --collect-data demoji \
     --collect-submodules moviepy \
@@ -172,8 +184,8 @@ if [ -f "$PROJECT_DIR/sign_tasks.example.json" ]; then
 fi
 
 echo "================ 打包完成 ================"
-echo "生成文件在 dist/$OUTPUT_NAME"
-echo "运行 ./dist/$OUTPUT_NAME 启动程序"
+echo "生成文件在 dist/$FINAL_NAME"
+echo "运行 ./dist/$FINAL_NAME 启动程序"
 
 # ------------------------------------------------------------
 # 清理编译产物，恢复源码目录（PyInstaller 已把扩展打包进可执行文件）

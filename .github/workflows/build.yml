@@ -72,15 +72,24 @@ jobs:
           path: artifacts
           pattern: teledown-*
 
-      - name: 创建 Release 并上传产物
+      - name: 创建 Release
         uses: softprops/action-gh-release@v2
         with:
           name: teledown ${{ github.ref_name }}
           tag_name: ${{ github.ref_name }}
-          files: |
-            artifacts/**/*
-            artifacts/**/.[!.]*
           generate_release_notes: true
-          fail_on_unmatched_files: false
           # 含 - 的标签（如 v1.0.0-rc1、v1.0.0-beta）标记为预发布版
           prerelease: ${{ contains(github.ref_name, '-') }}
+
+      # 用 gh CLI 遍历上传全部产物（find 会包含 .env.example 等隐藏文件，
+      # 避免 glob 不匹配点文件导致配置模板丢失）
+      - name: 上传全部产物到 Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd artifacts
+          find . -type f -print0 | while IFS= read -r -d '' f; do
+            echo "上传: $f"
+            gh release upload "${{ github.ref_name }}" "$f" --clobber
+          done
