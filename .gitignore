@@ -1,0 +1,14 @@
+# 构建产物
+/teledown-go
+/teledown-go.exe
+/dist/
+
+# 会话文件（SQLite，含 auth key，绝不可提交）
+*.session
+
+# 合并成会话库之前的两个 JSON：迁移后会读一次，原文件仍在本地
+*.gotd.json
+*.peers.json
+
+# 配置
+.env
