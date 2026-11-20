@@ -158,6 +158,8 @@ UPLOAD_SUPPORT=0 OUTPUT_NAME=teledown-noupload bash build.sh  # 精简版
 
 可用环境变量：`UPLOAD_SUPPORT`（1/0）、`OUTPUT_NAME`、`PYTHON`、`KEEP_COMPILED`。
 
+> Release 里的配置模板名为 `env.example`：GitHub Release 资源名不能以点开头（会被改写成 `default.env.example`），下载后 `cp env.example .env` 即可；从 Actions artifact 里取则是原始的 `dist/.env.example`。
+
 ## 常见错误
 
 1. `AttributeError: module 'socks' has no attribute 'SOCKS5'`，请确认安装了PySocks

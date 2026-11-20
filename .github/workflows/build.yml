@@ -106,7 +106,9 @@ jobs:
 
       # 用 gh CLI 遍历上传全部产物（find 会包含 .env.example 等隐藏文件，
       # 避免 glob 不匹配点文件导致配置模板丢失）
-      # 注：release job 未 checkout，需显式指定 GH_REPO，否则 gh 会用 git 发现仓库报 not a git repository
+      # 注 1：release job 未 checkout，需显式指定 GH_REPO，否则 gh 会用 git 发现仓库报 not a git repository
+      # 注 2：GitHub Release 资源名不能以点开头（会自动改写成 default.env.example），
+      #       因此配置模板在 Release 中统一叫 env.example
       - name: 上传全部产物到 Release
         shell: bash
         env:
@@ -115,6 +117,16 @@ jobs:
         run: |
           cd artifacts
           find . -type f -print0 | while IFS= read -r -d '' f; do
+            if [ "$(basename "$f")" = ".env.example" ]; then
+              continue
+            fi
             echo "上传: $f"
             gh release upload "${{ github.ref_name }}" "$f" --clobber
           done
+
+          tpl=$(find . -type f -name '.env.example' | head -n 1)
+          if [ -n "$tpl" ]; then
+            cp "$tpl" env.example
+            echo "上传: env.example (源: $tpl)"
+            gh release upload "${{ github.ref_name }}" env.example --clobber
+          fi
