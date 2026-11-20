@@ -140,6 +140,24 @@ python main.py monit -id 3333,4444 -user @someone,@another --prefix "*.pdf"
 2. 如果使用上传功能，需要安装额外的依赖。Linux系统安装`python-magic`、Windows系统安装`python-magic-bin==0.4.14`
 3. 本程序仅支持python3
 
+## 打包说明<a id="jump7"></a>
+
+`build.sh` 支持两种构建变体，CI（`.github/workflows/build.yml`）会为 Linux 和 Windows 各构建一份：
+
+| 变体 | 产物名 | 说明 | Linux 体积 |
+| --- | --- | --- | --- |
+| 全功能版 | `teledown-<平台>-<架构>` | 含 `upload`，打包 moviepy / Pillow / python-magic（内含 ffmpeg） | ≈111 MiB |
+| 精简版 | `teledown-noupload-<平台>-<架构>` | 不含 `upload`（执行时提示不支持），剔除 moviepy / imageio / PIL 及其自带 ffmpeg | ≈39 MiB |
+
+本地构建：
+
+```bash
+bash build.sh                                                 # 全功能版
+UPLOAD_SUPPORT=0 OUTPUT_NAME=teledown-noupload bash build.sh  # 精简版
+```
+
+可用环境变量：`UPLOAD_SUPPORT`（1/0）、`OUTPUT_NAME`、`PYTHON`、`KEEP_COMPILED`。
+
 ## 常见错误
 
 1. `AttributeError: module 'socks' has no attribute 'SOCKS5'`，请确认安装了PySocks

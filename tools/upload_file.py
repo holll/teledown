@@ -12,10 +12,20 @@ from tools.tqdm import TqdmUpTo
 
 
 async def upload_file(client: TelegramClient, chat_id, path: str, del_after_upload: bool, addtag):
+    # 上传依赖 moviepy / Pillow / python-magic；精简版（noupload）构建会排除它们，
+    # 这里降级为友好提示，而不是抛 ImportError 崩溃
     try:
         from moviepy.editor import VideoFileClip
     except ModuleNotFoundError:
-        from moviepy.video.io.VideoFileClip import VideoFileClip
+        try:
+            from moviepy.video.io.VideoFileClip import VideoFileClip
+        except ModuleNotFoundError:
+            VideoFileClip = None
+
+    if VideoFileClip is None:
+        print("当前版本未包含上传功能（构建时排除了 moviepy / Pillow / python-magic）")
+        print("如需上传，请使用全功能版 teledown-<平台>-<架构>（不带 noupload 后缀）")
+        return
 
     if not chat_id:
         print("上传目标频道ID未指定")

@@ -13,6 +13,7 @@ set -e
 #   OUTPUT_NAME   输出文件名前缀，默认 teledown（最终名：前缀-平台-架构）
 #   PYTHON        python 解释器，默认 python
 #   KEEP_COMPILED 置 1 时保留 Cython 编译产物（*.so/*.pyd）
+#   UPLOAD_SUPPORT 置 0 时构建精简版（不打包 moviepy/Pillow/python-magic，无 upload 功能）
 # ============================================================
 
 # 项目根目录（兼容 Windows Git Bash 的正斜杠路径）
@@ -22,6 +23,14 @@ MAIN_FILE="main.py"
 TOOLS_DIR="$PROJECT_DIR/tools"
 OUTPUT_NAME="${OUTPUT_NAME:-teledown}"
 PYTHON="${PYTHON:-python}"
+
+# 上传功能开关：1=全功能版（含 upload），0=精简版（无 upload，体积更小）
+UPLOAD_SUPPORT="${UPLOAD_SUPPORT:-1}"
+if [ "$UPLOAD_SUPPORT" = "1" ]; then
+    echo "[*] 构建模式: 全功能版（含 upload）"
+else
+    echo "[*] 构建模式: 精简版（不含 upload）"
+fi
 
 # 识别操作系统，用于后续平台差异处理
 UNAME_S="$(uname -s)"
@@ -74,19 +83,26 @@ python -m pip install --upgrade pip
 python -m pip install "setuptools<81" wheel cython pyinstaller
 
 echo "[*] 安装项目运行依赖..."
-python -m pip install -r requirements.txt -r requirements_upload.txt
+python -m pip install -r requirements.txt
 python -m pip install python-socks
 
-# 文件类型识别库（magic）：Linux/macOS 用 python-magic，Windows 用 python-magic-bin
-# 上传功能为可选，安装失败不阻塞打包
-case "$OS_NAME" in
-    windows)
-        python -m pip install python-magic-bin==0.4.14 || echo "[!] python-magic-bin 安装失败，上传功能将不可用"
-        ;;
-    *)
-        python -m pip install python-magic || echo "[!] python-magic 安装失败，上传功能将不可用"
-        ;;
-esac
+# 上传相关依赖（moviepy / Pillow / python-magic）仅在 UPLOAD_SUPPORT=1 时安装
+if [ "$UPLOAD_SUPPORT" = "1" ]; then
+    python -m pip install -r requirements_upload.txt
+
+    # 文件类型识别库（magic）：Linux/macOS 用 python-magic，Windows 用 python-magic-bin
+    # 上传功能为可选，安装失败不阻塞打包
+    case "$OS_NAME" in
+        windows)
+            python -m pip install python-magic-bin==0.4.14 || echo "[!] python-magic-bin 安装失败，上传功能将不可用"
+            ;;
+        *)
+            python -m pip install python-magic || echo "[!] python-magic 安装失败，上传功能将不可用"
+            ;;
+    esac
+else
+    echo "[*] 跳过上传相关依赖（moviepy / Pillow / python-magic）"
+fi
 
 # 验证 pkg_resources（旧版 PyInstaller/altgraph 依赖）
 python - <<'EOF'
@@ -144,15 +160,34 @@ echo "[*] 开始使用 PyInstaller 打包..."
 HIDDEN_IMPORTS=(
     python_socks   # main.py 中按需导入的代理库
     cryptg         # telethon 运行时条件导入的加密库
-    magic          # upload 文件类型识别（未安装时 PyInstaller 仅告警）
     pandas
-    moviepy
 )
+if [ "$UPLOAD_SUPPORT" = "1" ]; then
+    HIDDEN_IMPORTS+=(
+        magic      # upload 文件类型识别（未安装时 PyInstaller 仅告警）
+        moviepy    # upload 视频缩略图/时长
+    )
+fi
 
 HIDDEN_ARGS=()
 for mod in "${HIDDEN_IMPORTS[@]}"; do
     HIDDEN_ARGS+=(--hidden-import "$mod")
 done
+
+COLLECT_ARGS=(--collect-data demoji)
+EXCLUDE_ARGS=()
+if [ "$UPLOAD_SUPPORT" = "1" ]; then
+    COLLECT_ARGS+=(--collect-submodules moviepy)
+else
+    # 精简版：显式排除上传相关依赖（含 moviepy 依赖的 imageio/ffmpeg 二进制）
+    EXCLUDE_ARGS+=(
+        --exclude-module moviepy
+        --exclude-module imageio
+        --exclude-module imageio_ffmpeg
+        --exclude-module PIL
+        --exclude-module magic
+    )
+fi
 
 python -m PyInstaller \
     --clean \
@@ -160,8 +195,8 @@ python -m PyInstaller \
     --onefile \
     --name "$FINAL_NAME" \
     "${HIDDEN_ARGS[@]}" \
-    --collect-data demoji \
-    --collect-submodules moviepy \
+    "${EXCLUDE_ARGS[@]}" \
+    "${COLLECT_ARGS[@]}" \
     "$MAIN_FILE"
 
 # ------------------------------------------------------------

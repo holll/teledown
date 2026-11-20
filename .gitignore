@@ -9,6 +9,13 @@ Pipfile*
 # C extensions
 *.so
 *.pyd
+# Cython 生成的 C 源码（build.sh 产物，不入库）
+tools/*.c
+
+# 构建产物压缩包
+*.gz
+*.zip
+*.tar.gz
 
 # config
 *.json

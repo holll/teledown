@@ -20,9 +20,12 @@ permissions:
 jobs:
   build:
     strategy:
-      fail-fast: false   # 一个平台失败不阻塞其他平台
+      fail-fast: false   # 一个平台/一种变体失败不阻塞其他
       matrix:
         os: [ubuntu-latest, windows-latest]
+        # full     = 全功能版（含 upload，打包 moviepy/Pillow/python-magic，体积大）
+        # noupload = 精简版（无 upload，剔除 moviepy/imageio/PIL 及其自带 ffmpeg，体积小）
+        variant: [full, noupload]
         python-version: ['3.12']
 
     runs-on: ${{ matrix.os }}
@@ -48,12 +51,30 @@ jobs:
 
       - name: 执行打包 (build.sh)
         shell: bash
+        env:
+          UPLOAD_SUPPORT: ${{ matrix.variant == 'full' && '1' || '0' }}
+          OUTPUT_NAME: ${{ matrix.variant == 'full' && 'teledown' || 'teledown-noupload' }}
         run: bash build.sh
+
+      - name: 冒烟测试 (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          for f in dist/teledown-*; do
+            [ -f "$f" ] || continue
+            case "$f" in
+              *.json|*.example) continue ;;
+            esac
+            chmod +x "$f"
+            if file "$f" | grep -q 'ELF'; then
+              "$f" --help >/dev/null && echo "OK: $f"
+            fi
+          done
 
       - name: 上传构建产物
         uses: actions/upload-artifact@v4
         with:
-          name: teledown-${{ matrix.os }}-py${{ matrix.python-version }}
+          name: teledown-${{ matrix.os }}-${{ matrix.variant }}-py${{ matrix.python-version }}
           # .env.example 是隐藏文件，glob 的 * 默认不会匹配点开头文件，
           # 因此用显式路径列出来
           path: |
@@ -61,7 +82,7 @@ jobs:
             dist/.env.example
           if-no-files-found: error
 
-  # 推送 v* 标签时，等 Linux/Windows 构建全部成功后自动创建 Release 并挂上产物
+  # 推送 v* 标签时，等 Linux/Windows 各变体构建全部成功后自动创建 Release 并挂上产物
   release:
     needs: build
     if: startsWith(github.ref, 'refs/tags/v')
