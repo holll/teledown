@@ -124,15 +124,25 @@ async def get_history_message(
     return channel_title, filter_messages_by_user(messages)
 
 
-async def get_chat_id(client: TelegramClient, chat_id: str) -> int:
-    """检测 chat_id 是 ID 还是昵称，返回整数 ID。"""
-    isId = re.match(r'-?[1-9][0-9]{4,}', chat_id)
-    if isId is None:
-        entity = await client.get_entity(chat_id)
-        chat_id = entity.id
-    else:
-        chat_id = int(chat_id)
-    return chat_id
+async def get_chat_id(client: TelegramClient, chat_id) -> int:
+    """检测 chat_id 是 ID 还是昵称，返回整数 ID。
+
+    同时兼容 str 与 int：调用方可能已经把纯数字 ID 转成 int
+    （argparse 的 type=int、配置项解析、监控/钩子回调等），
+    旧实现直接对 int 调 re.match() 会抛 TypeError。
+    """
+    if chat_id is None or isinstance(chat_id, bool):
+        raise TypeError(f'get_chat_id 需要 str 或 int，收到 {type(chat_id).__name__}')
+    if isinstance(chat_id, int):
+        return chat_id
+    text = str(chat_id).strip()
+    if not text:
+        raise ValueError('get_chat_id 收到空的频道标识')
+    # 纯数字（可带负号）视为 ID；fullmatch 避免 "12345abc" 这类前缀被误判成 ID
+    if re.fullmatch(r'-?[1-9][0-9]{4,}', text):
+        return int(text)
+    entity = await client.get_entity(text)
+    return entity.id
 
 
 async def get_chat_title(client: TelegramClient, chat_id: int) -> Optional[str]:
