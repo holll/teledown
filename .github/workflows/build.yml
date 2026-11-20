@@ -75,8 +75,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: teledown-${{ matrix.os }}-${{ matrix.variant }}-py${{ matrix.python-version }}
-          # .env.example 是隐藏文件，glob 的 * 默认不会匹配点开头文件，
-          # 因此用显式路径列出来
+          # .env.example 是隐藏文件：v4 默认 include-hidden-files=false 会静默跳过，
+          # 即使 path 里显式写了 dist/.env.example 也不行，必须显式打开
+          include-hidden-files: true
           path: |
             dist/*
             dist/.env.example
