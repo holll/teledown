@@ -70,6 +70,8 @@ jobs:
       - name: 离线回归与打包产物验收
         shell: bash
         env:
+          # Windows 的 CI 管道默认可能为 cp1252；源码测试会输出中文。
+          PYTHONIOENCODING: utf-8
           VARIANT: ${{ matrix.variant }}
           OUTPUT_NAME: ${{ matrix.variant == 'full' && 'teledown' || 'teledown-noupload' }}
         run: |

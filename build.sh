@@ -195,6 +195,7 @@ python -m PyInstaller \
     --clean \
     --noconfirm \
     --onefile \
+    --python-option 'X utf8' \
     --name "$FINAL_NAME" \
     --additional-hooks-dir "$PROJECT_DIR/packaging/hooks" \
     "${HIDDEN_ARGS[@]}" \
