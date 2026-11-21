@@ -23,8 +23,8 @@ jobs:
       fail-fast: false   # 一个平台/一种变体失败不阻塞其他
       matrix:
         os: [ubuntu-latest, windows-latest]
-        # full     = 全功能版（含 upload，打包 moviepy/Pillow/python-magic，体积大）
-        # noupload = 精简版（无 upload，剔除 moviepy/imageio/PIL 及其自带 ffmpeg，体积小）
+        # full     = 全功能版（含 upload，视频使用系统 FFmpeg）
+        # noupload = 精简版（无 upload，不需要 FFmpeg）
         variant: [full, noupload]
         python-version: ['3.12']
 
@@ -43,11 +43,22 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential python3-dev libmagic1 upx ffmpeg
+          sudo apt-get install -y build-essential python3-dev libmagic1 upx
+
+      - name: 安装视频自检所需的 FFmpeg (Linux)
+        if: runner.os == 'Linux' && matrix.variant == 'full'
+        run: sudo apt-get install -y ffmpeg
 
       - name: 安装系统依赖 (Windows)
         if: runner.os == 'Windows'
         run: choco install -y upx
+
+      - name: 安装视频自检所需的 FFmpeg (Windows)
+        if: runner.os == 'Windows' && matrix.variant == 'full'
+        run: |
+          choco install -y ffmpeg
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "$env:ChocolateyInstall\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
       - name: 执行打包 (build.sh)
         shell: bash
@@ -56,20 +67,24 @@ jobs:
           OUTPUT_NAME: ${{ matrix.variant == 'full' && 'teledown' || 'teledown-noupload' }}
         run: bash build.sh
 
-      - name: 冒烟测试 (Linux)
-        if: runner.os == 'Linux'
+      - name: 离线回归与打包产物验收
         shell: bash
+        env:
+          VARIANT: ${{ matrix.variant }}
+          OUTPUT_NAME: ${{ matrix.variant == 'full' && 'teledown' || 'teledown-noupload' }}
         run: |
-          for f in dist/teledown-*; do
-            [ -f "$f" ] || continue
-            case "$f" in
-              *.json|*.example) continue ;;
-            esac
-            chmod +x "$f"
-            if file "$f" | grep -q 'ELF'; then
-              "$f" --help >/dev/null && echo "OK: $f"
-            fi
-          done
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            py=venv/Scripts/python.exe
+            binary="dist/${OUTPUT_NAME}-windows-x86_64.exe"
+          else
+            py=venv/bin/python
+            binary="dist/${OUTPUT_NAME}-linux-x86_64"
+          fi
+          "$py" -m pip check
+          "$py" -m unittest discover -s tests -v
+          test -f "$binary"
+          "$binary" --help
+          "$binary" self-test "$VARIANT"
 
       - name: 上传构建产物
         uses: actions/upload-artifact@v4
@@ -79,7 +94,9 @@ jobs:
           # 即使 path 里显式写了 dist/.env.example 也不行，必须显式打开
           include-hidden-files: true
           path: |
-            dist/*
+            dist/teledown*-linux-x86_64
+            dist/teledown*-windows-x86_64.exe
+            dist/sign_tasks.example.json
             dist/.env.example
           if-no-files-found: error
 

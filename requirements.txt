@@ -1,5 +1,4 @@
 demoji
-pandas
 telethon==1.45.0
 cryptg
 python-socks

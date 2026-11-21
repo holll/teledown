@@ -1,2 +1,2 @@
-moviepy
+moviepy>=2,<3
 Pillow

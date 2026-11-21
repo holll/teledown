@@ -91,15 +91,16 @@ if [ "$UPLOAD_SUPPORT" = "1" ]; then
     python -m pip install -r requirements_upload.txt
 
     # 文件类型识别库（magic）：Linux/macOS 用 python-magic，Windows 用 python-magic-bin
-    # 上传功能为可选，安装失败不阻塞打包
+    # 全功能版必须能加载 libmagic，不能把不可上传的产物标为全功能。
     case "$OS_NAME" in
         windows)
-            python -m pip install python-magic-bin==0.4.14 || echo "[!] python-magic-bin 安装失败，上传功能将不可用"
+            python -m pip install python-magic-bin==0.4.14
             ;;
         *)
-            python -m pip install python-magic || echo "[!] python-magic 安装失败，上传功能将不可用"
+            python -m pip install python-magic
             ;;
     esac
+    python -c 'import magic; magic.Magic(mime=True).from_buffer(b"teledown")'
 else
     echo "[*] 跳过上传相关依赖（moviepy / Pillow / python-magic）"
 fi
@@ -158,9 +159,9 @@ echo "[*] 开始使用 PyInstaller 打包..."
 
 # 隐藏导入：函数内/运行时才 import 的模块，PyInstaller 静态分析可能遗漏
 HIDDEN_IMPORTS=(
+    csv            # tools.tool 经 Cython 编译后，PyInstaller 无法扫描其导入
     python_socks   # main.py 中按需导入的代理库
     cryptg         # telethon 运行时条件导入的加密库
-    pandas
 )
 if [ "$UPLOAD_SUPPORT" = "1" ]; then
     HIDDEN_IMPORTS+=(
@@ -175,7 +176,8 @@ for mod in "${HIDDEN_IMPORTS[@]}"; do
 done
 
 COLLECT_ARGS=(--collect-data demoji)
-EXCLUDE_ARGS=()
+# CLI 不使用 Tk，避免 PyInstaller 带入 Tcl/Tk 运行时。
+EXCLUDE_ARGS=(--exclude-module tkinter --exclude-module _tkinter)
 if [ "$UPLOAD_SUPPORT" = "1" ]; then
     COLLECT_ARGS+=(--collect-submodules moviepy)
 else
@@ -194,10 +196,29 @@ python -m PyInstaller \
     --noconfirm \
     --onefile \
     --name "$FINAL_NAME" \
+    --additional-hooks-dir "$PROJECT_DIR/packaging/hooks" \
     "${HIDDEN_ARGS[@]}" \
     "${EXCLUDE_ARGS[@]}" \
     "${COLLECT_ARGS[@]}" \
     "$MAIN_FILE"
+
+BINARY_PATH="dist/$FINAL_NAME"
+if [ "$OS_NAME" = "windows" ]; then
+    BINARY_PATH+=.exe
+fi
+python - "$BINARY_PATH" <<'PY'
+import re
+import sys
+from PyInstaller.archive.readers import CArchiveReader
+
+archive = CArchiveReader(sys.argv[1])
+for entry in archive.toc:
+    path = entry.replace('\\', '/').lower()
+    if '/imageio_ffmpeg/binaries/' in '/' + path or re.fullmatch(
+        r'(?:ffmpeg|ffprobe)(?:-[^.]+(?:\.[^.]+)*)?(?:\.exe)?', path.rsplit('/', 1)[-1]
+    ):
+        sys.exit(f'构建意外内置 FFmpeg 资源：{entry}')
+PY
 
 # ------------------------------------------------------------
 # 附带运行时配置文件（方便分发/开箱即用）

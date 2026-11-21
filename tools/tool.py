@@ -1,15 +1,17 @@
+import csv
 import fnmatch
 import hashlib
 import os
 import re
+import shutil
 import subprocess
+from pathlib import Path
 import sys
 from io import BytesIO
 from typing import Optional
 
 import demoji
-import pandas as pd
-from telethon import TelegramClient
+from telethon import TelegramClient, utils
 from telethon.tl import types
 
 # 模块级频道别名缓存，替代 os.environ 做缓存
@@ -37,89 +39,99 @@ def shorten_filename(filename: str, limit: int = 50) -> str:
     return filename[:int(limit / 2) - 3] + '...' + filename[len(filename) - int(limit / 2):]
 
 
-async def print_all_channel(client: TelegramClient) -> None:
-    ids = []
-    names = []
-    async for d in client.iter_dialogs():
-        if not isinstance(d.entity, types.Channel):
-            continue
-        ids.append(d.entity.id)
-        names.append(d.name)
+def _write_csv(path: str, headers: tuple[str, ...], rows) -> None:
+    with open(path, 'w', encoding='utf-8', newline='') as file:
+        writer = csv.writer(file, lineterminator=os.linesep)
+        writer.writerow(headers)
+        writer.writerows(rows)
 
-    df = pd.DataFrame({'ID': ids, '频道名': names})
-    df.sort_values("频道名", inplace=True)
-    df.to_csv('全部频道.csv', index=False)
+
+async def print_all_channel(client: TelegramClient) -> None:
+    rows = []
+    async for dialog in client.iter_dialogs():
+        if isinstance(dialog.entity, types.Channel):
+            rows.append((dialog.entity.id, dialog.name))
+
+    rows.sort(key=lambda row: (row[1] is None, row[1] or ''))
+    _write_csv('全部频道.csv', ('ID', '频道名'), rows)
     print('全部输出完成')
 
 
-async def parse_user_ids(client: TelegramClient, user_refs) -> set[int]:
-    target_ids: set[int] = set()
-    if not user_refs:
-        return target_ids
+async def parse_user_ids(client: TelegramClient, user_refs: Optional[str]) -> Optional[set[int]]:
+    """None 表示未指定过滤；显式列表不允许有无效项。"""
+    if user_refs is None:
+        return None
 
-    for user_ref in str(user_refs).replace('|', ',').split(','):
-        user_ref = user_ref.strip()
-        if not user_ref:
-            continue
-        if user_ref.isdecimal():
-            target_ids.add(int(user_ref))
+    refs = [part.strip() for part in user_refs.replace('|', ',').split(',')]
+    if not all(refs):
+        raise UserAbort('-user 不能为空，也不能包含空的用户标识')
+
+    target_ids: set[int] = set()
+    for user_ref in refs:
+        if re.fullmatch(r'-?[0-9]+', user_ref):
+            user_id = int(user_ref)
+            if not user_id:
+                raise UserAbort('-user 的用户 ID 不能为 0')
+            target_ids.add(user_id)
             continue
         try:
             entity = await client.get_entity(user_ref)
-            target_ids.add(entity.id)
-        except Exception as e:
-            print(f"无法解析用户 {user_ref}: {e}")
+            target_ids.add(utils.get_peer_id(entity))
+        except Exception as exc:
+            raise UserAbort(f'无法解析用户 {user_ref}: {exc}') from exc
     return target_ids
+
+
+def matches_sender(sender_id: Optional[int], user_ids: Optional[set[int]]) -> bool:
+    return user_ids is None or (sender_id is not None and sender_id in user_ids)
+
+
+def parse_message_range(value: str) -> dict:
+    """把 CLI 消息范围转换为 Telethon 的查询参数。"""
+    max_message_id = 2_147_483_647
+
+    def message_id(text: str, minimum: int = 1) -> int:
+        number = int(text)
+        if not minimum <= number <= max_message_id:
+            raise ValueError(f'消息 ID 必须在 {minimum} 到 {max_message_id} 之间')
+        return number
+
+    value = value.strip()
+    if re.fullmatch(r's[0-9]+(?:s|\.\.)[0-9]+', value):
+        raise ValueError('旧区间格式已移除，请改用 A..B（例如 1..100）')
+    if match := re.fullmatch(r'([0-9]+)\.\.([0-9]+)', value):
+        low, high = message_id(match[1], 0), message_id(match[2])
+        if low > high:
+            raise ValueError('区间下限不能大于上限')
+        # Telethon 的上下界均为开区间；0 表示不限制该端。
+        return {'min_id': max(0, low - 1), 'max_id': 0 if high == max_message_id else high + 1}
+    if match := re.fullmatch(r'([<>])([0-9]+)', value):
+        if match[1] == '>':
+            return {'min_id': message_id(match[2], 0)}
+        return {'max_id': message_id(match[2])}
+    if match := re.fullmatch(r'=?([0-9]+)', value):
+        return {'ids': message_id(match[1])}
+    if re.fullmatch(r'[0-9]+(?:\s*,\s*[0-9]+)+', value):
+        return {'ids': [message_id(part) for part in value.split(',')], 'reverse': True}
+    raise ValueError('应为 >N、<N、N、=N、A..B 或逗号分隔的消息 ID')
 
 
 async def get_history_message(
         client: TelegramClient,
         chat_id: int,
-        plus_func: Optional[str] = None,
+        message_range: Optional[dict] = None,
         from_user_ids: Optional[set[int]] = None,
 ):
     channel_title = await get_chat_title(client, chat_id)
-    filter_user = None
-    if from_user_ids:
-        if len(from_user_ids) == 1:
-            filter_user = next(iter(from_user_ids))
-
     async def filter_messages_by_user(messages):
         async for message in messages:
-            # Todo 疑似以当前频道or群组身份发言不会存在sender_id
-            if not from_user_ids or message.sender_id in from_user_ids or message.sender_id is None:
+            if message is None or matches_sender(message.sender_id, from_user_ids):
                 yield message
 
-    if plus_func is not None:
-        # 自动检测 .. 分隔符并标准化为 s 前缀格式，兼容 --range "10..200" 用法
-        if '..' in plus_func and plus_func[0] not in ('>', '<', '=', 's'):
-            plus_func = 's' + plus_func
-        filterFunc = plus_func[:1]
-        # 多选消息ID模式
-        if ',' in plus_func:
-            ids = [int(_id) for _id in plus_func.split(',')]
-            messages = client.iter_messages(chat_id, reverse=True, min_id=1, ids=ids)
-        elif filterFunc != 's':
-            specifyID = int(plus_func[1:])
-            # 大于范围模式
-            if filterFunc == '>':
-                messages = client.iter_messages(chat_id, min_id=specifyID, from_user=None)
-            # 小于范围模式
-            elif filterFunc == '<':
-                messages = client.iter_messages(chat_id, max_id=specifyID, from_user=None)
-            else:
-                # 单选模式
-                messages = client.iter_messages(chat_id, ids=specifyID)
-        else:
-            # 区间模式 — 支持 s 和 .. 两种分隔符
-            rest = plus_func[1:]
-            if '..' in rest:
-                low, high = rest.split('..', 1)
-            else:
-                low, high = rest.split('s', 1)
-            messages = client.iter_messages(chat_id, max_id=int(high), min_id=int(low), from_user=filter_user)
-    else:
-        messages = client.iter_messages(chat_id, reverse=True, min_id=1, from_user=None)
+    query = dict(message_range) if message_range is not None else {'reverse': True, 'min_id': 1}
+    if 'min_id' in query and 'max_id' in query and from_user_ids and len(from_user_ids) == 1:
+        query['from_user'] = next(iter(from_user_ids))
+    messages = client.iter_messages(chat_id, **query)
 
     return channel_title, filter_messages_by_user(messages)
 
@@ -200,35 +212,28 @@ async def print_group(client: TelegramClient, chat_id) -> None:
     channel_title, messages = await get_history_message(client=client, chat_id=int(chat_id))
     channel_title = demoji.replace(channel_title, '[emoji]')
     channel_title = re.sub(r'[\\/:*?"<>|]', '', channel_title)
-    links: list[str] = []
-    names: list[str] = []
-    submits: list[str] = []
-    sizes: list[str] = []
+    rows = []
+    seen: set[tuple[str, str]] = set()
     async for message in messages:
-        if message.media is not None:
-            is_photo = isinstance(message.media, types.MessageMediaPhoto)
-            is_doc = isinstance(message.media, types.MessageMediaDocument)
-            if not (is_photo or is_doc):
-                continue
+        if message is None or not isinstance(message.media, (types.MessageMediaPhoto, types.MessageMediaDocument)):
+            continue
 
-            file_name = get_file_name(message)
+        file_name = get_file_name(message)
+        size = message.file.size
+        formatted_size = (
+            f'{round(size / 1024 ** 2, 2)}MB'
+            if size > 1024 ** 2
+            else f'{round(size / 1024, 2)}KB'
+        )
+        key = (file_name, formatted_size)
+        if key in seen:
+            continue
+        seen.add(key)
+        link = f'https://t.me/c/{chat_id}/{message.id}'
+        rows.append((link, file_name, message.message, formatted_size))
 
-            file_size = message.file.size
-            file_size = (
-                f'{round(file_size / 1024 ** 2, 2)}MB'
-                if file_size > 1024 ** 2
-                else f'{round(file_size / 1024, 2)}KB'
-            )
-            link = f'https://t.me/c/{chat_id}/{message.id}'
-            links.append(link)
-            names.append(file_name)
-            submits.append(message.message)
-            sizes.append(file_size)
-
-    df = pd.DataFrame({'链接': links, '文件名': names, '描述': submits, '大小': sizes})
-    df.drop_duplicates(subset=["文件名", "大小"], keep="first", inplace=True)
-    df.sort_values("链接", inplace=True, ascending=False)
-    df.to_csv(f'{channel_title}-{chat_id}.csv', index=False)
+    rows.sort(key=lambda row: row[0], reverse=True)
+    _write_csv(f'{channel_title}-{chat_id}.csv', ('链接', '文件名', '描述', '大小'), rows)
     print(chat_id, '全部输出完成')
 
 
@@ -256,12 +261,23 @@ def get_all_files(path: str) -> list[str]:
     return sorted(all_files)
 
 
+def configure_ffmpeg() -> None:
+    """在 MoviePy 加载配置前，只选择外部 FFmpeg。"""
+    override = os.environ.get('FFMPEG_BINARY')
+    executable = shutil.which(override or 'ffmpeg')
+    if executable is None:
+        hint = '，请检查 FFMPEG_BINARY' if override else '，请安装 FFmpeg 并将其加入 PATH，或设置 FFMPEG_BINARY'
+        raise UserAbort(f'找不到可执行的 FFmpeg{hint}')
+    os.environ['FFMPEG_BINARY'] = str(Path(executable).absolute())
+
+
 def get_thumb(file_path: str) -> bytes:
     """从视频文件提取第一帧作为缩略图。"""
+    configure_ffmpeg()
     from PIL import Image
-    from moviepy.video.io.VideoFileClip import VideoFileClip
+    from moviepy import VideoFileClip
 
-    with VideoFileClip(file_path) as video:
+    with VideoFileClip(file_path, audio=False) as video:
         video_image = video.get_frame(0)
 
     video_image = Image.fromarray(video_image)

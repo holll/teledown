@@ -24,7 +24,7 @@
 |---|---|---|
 | `main.py` | 7 个子命令、`.env` 读取、代理解析、会话名（md5）、命令分发 | Go 侧 `flag`/`cobra` + `godotenv`；Rust 侧 `clap` + `dotenvy` |
 | `tools/down_file.py` | 下载、进度条、`.downloading` 临时文件、ref 过期重试 | 两候选都需自己接进度回调 |
-| `tools/tool.py` | 频道枚举、实体解析、文件名规则、CSV 输出、通配符 | `demoji`/`fnmatch`/`pandas` 需换等价物 |
+| `tools/tool.py` | 频道枚举、实体解析、文件名规则、CSV 输出、通配符 | `demoji`/`fnmatch`/标准库 `csv` 需换等价物 |
 | `tools/upload_file.py` | magic 判类型、ffmpeg 取首帧、上传、视频属性 | 两候选都有视频属性对应；ffmpeg 策略需重新决策 |
 | `tools/sign.py` | 读 JSON 任务、发消息、按文字/行列点击 inline 按钮 | 点击按钮两候选都需走原始 API |
 | `tools/monit.py` | `events.NewMessage(chats=...)` + 按发送者过滤 | 转成更新订阅 + 自行过滤 |
@@ -34,7 +34,7 @@
 
 这些规则散落在代码里，没有文档、没有测试，是重写时最易出错的地方。**建议动手前先固化成规格 + 用例**：
 
-- `--range` 五种语法：`>n`、`<n`、单个 id、`s10s200`、`10..200`（自动补 `s` 前缀）、逗号分隔 id 列表（详见 `tools/tool.py` 的 `get_history_message`）
+- Python 最终版的 `--range` 语法：`>N`、`<N`、单条 `N` 或 `=N`、闭区间 `A..B`（包含 A 和 B）、逗号分隔的消息 ID 列表。旧 `sAsB` 和 `sA..B` 写法不再支持；详见 `tools/tool.py` 的 `parse_message_range`。
 - 文件名优先级：原始文件名 > 消息文本 > 文件 ID；文本经 `shorten_filename` 截断到 50 字（中间省略号），emoji 替换为 `[emoji]`
 - 扩展名规则：`.jpe`/`.jpeg` 统一为 `.jpg`；非法字符 `[\\/:*?"<>|]` 剔除（标题）或替换为 `_`（文件名）
 - 频道标题格式：用户为 `username(firstlast)`，频道/群为 `title`

@@ -1,7 +1,12 @@
 import os
-import traceback
+import re
+import stat
+import sys
 from asyncio import CancelledError
-from datetime import datetime
+from collections import Counter
+from enum import Enum
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from telethon import TelegramClient
 from telethon.errors import FileReferenceExpiredError
@@ -12,119 +17,117 @@ from tools.tool import (get_file_name, get_history_message, get_chat_id, match_w
 from tools.tqdm import TqdmUpTo
 
 
-# TODO 或许能加快下载速度的方法（https://gist.github.com/painor/7e74de80ae0c819d3e9abcf9989a8dd6）
+class DownloadResult(Enum):
+    DOWNLOADED = 'downloaded'
+    SKIPPED = 'skipped'
+    FAILED = 'failed'
 
 
-def _remove_partial(download_path: str) -> None:
-    """删除未完成的临时文件，避免残留 .downloading 碎片。"""
-    if os.path.exists(download_path):
-        os.remove(download_path)
+_WINDOWS_DEVICE = re.compile(r'(?:CON|PRN|AUX|NUL|CONIN\$|CONOUT\$|(?:COM|LPT)[1-9¹²³])', re.IGNORECASE)
 
 
-def file_exist(file_path: str, file_size: int) -> tuple[bool, str]:
-    """检查文件是否存在（文件名和大小都相等），若存在重名文件则自动加序号。"""
+def safe_path_component(value: str) -> str:
+    """Keep a single portable path component, even for untrusted Telegram names."""
+    name = re.sub(r'[\\/:*?"<>|\x00-\x1f\x7f]', '_', value).strip(' .') or '_'
+    if _WINDOWS_DEVICE.fullmatch(name.partition('.')[0].rstrip(' ')):
+        name = '_' + name
+    return name
+
+
+def _check_directory(root: Path, directory: Path) -> None:
+    if directory.is_symlink() or directory.resolve() != directory or directory.parent != root:
+        raise ValueError('保存子目录不能是链接或指向保存目录之外')
+
+
+def file_exist(file_path: Path, file_size: int | None) -> tuple[bool, Path]:
+    """Preserve the existing name/size deduplication and collision suffixes."""
+    candidate = file_path
     i = 2
-    file_name, file_type = os.path.splitext(file_path)
-    temp = file_path
-    while os.path.exists(temp):
-        if os.path.getsize(temp) == file_size:
-            return True, temp
-        temp = f'{file_name}({i}){file_type}'
-        i += 1
-    return False, temp
-
-
-def get_file_suffix(message) -> list[str]:
-    mime_type = 'unknown/unknown'
-    if hasattr(message.media, 'document'):
-        mime_type = message.media.document.mime_type
-    elif hasattr(message.media, 'photo'):
-        mime_type = 'image/jpg'
-    return mime_type.split('/')
-
-
-async def download_file(client: TelegramClient, channel_title, channel_id, message, prefix=None):
-    message_time = message.date
-    formatted_time = datetime.strftime(message_time, '%Y_%m')
-
-    file_name = get_file_name(message)
-    if not match_wildcard(prefix, file_name):
-        return
-    file_path = os.path.join(os.environ.get("save_path", ""), f'{channel_title}-{channel_id}', file_name)
-    file_size = message.file.size
-    ret, file_path = file_exist(file_path, file_size)
-    if ret:
-        print(f"媒体已存在：{file_path}")
-        return
-
-    download_path = file_path + '.downloading'
-    print(f"开始下载：{file_name}")
-
-    for attempt in range(2):  # 最多尝试 2 次
+    while True:
         try:
-            with TqdmUpTo(total=file_size, bar_format=TqdmUpTo.bar_format, desc=file_name[:10]) as bar:
-                await message.download_media(download_path, progress_callback=bar.update_to)
-            os.rename(download_path, file_path)
-            return
-        except CancelledError:
-            print("取消下载")
-            _remove_partial(download_path)
-            raise UserAbort("下载已被取消")
-        except FileReferenceExpiredError:
-            # 文档的 file_reference 过期已由 Telethon 内部自愈：_DirectDownloadIter._request()
-            # 会捕获 FilerefUpgradeNeededError / FileReferenceExpiredError，重新拉取消息后
-            # 从当前分片继续，无需在此重复处理。
-            # 照片走的是 InputPhotoFileLocation，不适用该自愈路径，才需要本地换一次新引用重试。
-            if attempt == 1 or not isinstance(message.media, MessageMediaPhoto):
-                print('文件引用已过期，跳过该文件')
-                _remove_partial(download_path)
-                return
-            print('文件引用已过期，重新获取消息后重试')
-            try:
-                channel_data = await client.get_entity(int(channel_id))
-                new_message = await client.get_messages(channel_data, ids=message.id)
-            except Exception:
-                print('重新获取消息失败，跳过该文件')
-                traceback.print_exc()
-                _remove_partial(download_path)
-                return
-            if new_message is None:
-                print('消息已不存在，跳过该文件')
-                _remove_partial(download_path)
-                return
-            message = new_message
-        except KeyboardInterrupt:
-            print("用户中断下载")
-            _remove_partial(download_path)
-            raise
-        except Exception as e:
-            print(f"下载出错 {e.__class__.__name__}: {e}")
-            traceback.print_exc()
-            _remove_partial(download_path)
-            return
+            info = candidate.lstat()
+        except FileNotFoundError:
+            return False, candidate
+        if not stat.S_ISREG(info.st_mode) or candidate.resolve() != candidate:
+            raise ValueError(f'下载目标不是普通文件: {candidate.name}')
+        if info.st_size == file_size:
+            return True, candidate
+        candidate = file_path.with_name(f'{file_path.stem}({i}){file_path.suffix}')
+        i += 1
 
 
-async def down_group(client: TelegramClient, chat_id, plus_func: str, from_user, prefix):
+async def download_file(client: TelegramClient, channel_title, channel_id, message, prefix=None) -> DownloadResult:
+    try:
+        original_name = get_file_name(message)
+        if not match_wildcard(prefix, original_name):
+            return DownloadResult.SKIPPED
+        file_name = safe_path_component(original_name)
+        root = Path(os.environ.get('save_path', '')).resolve()
+        directory = root / safe_path_component(f'{channel_title}-{channel_id}')
+        _check_directory(root, directory)
+        directory.mkdir(parents=True, exist_ok=True)
+        _check_directory(root, directory)
+        target = directory / file_name
+        file_size = message.file.size
+        exists, file_path = file_exist(target, file_size)
+        if exists:
+            print(f'媒体已存在：{file_path}')
+            return DownloadResult.SKIPPED
+
+        print(f'开始下载：{file_name}')
+        with TemporaryDirectory(prefix='.teledown-', dir=directory) as temp_dir:
+            partial = Path(temp_dir) / 'payload.downloading'
+            for attempt in range(2):
+                try:
+                    with partial.open('wb') as output, TqdmUpTo(
+                            total=file_size, bar_format=TqdmUpTo.bar_format, desc=file_name[:10]) as bar:
+                        downloaded = await message.download_media(output, progress_callback=bar.update_to)
+                        if downloaded is None:
+                            raise OSError('Telegram 未返回可下载的媒体')
+                    break
+                except FileReferenceExpiredError:
+                    # Telethon 会自行刷新文档引用；仅照片需要额外刷新一次。
+                    if attempt or not isinstance(message.media, MessageMediaPhoto):
+                        raise
+                    channel = await client.get_entity(int(channel_id))
+                    message = await client.get_messages(channel, ids=message.id)
+                    if message is None:
+                        raise OSError('文件引用已过期，且原消息已不存在')
+
+            _check_directory(root, directory)
+            # 监控任务可能在 await 期间写入同名文件，提交前重新选择目标。
+            exists, file_path = file_exist(target, file_size)
+            if exists:
+                print(f'媒体已存在：{file_path}')
+                return DownloadResult.SKIPPED
+            partial.replace(file_path)
+        return DownloadResult.DOWNLOADED
+    except CancelledError as exc:
+        raise UserAbort('下载已被取消') from exc
+    except Exception as exc:
+        print(f'下载失败（消息 {message.id if message is not None else "未知"}）：{type(exc).__name__}: {exc}',
+              file=sys.stderr)
+        return DownloadResult.FAILED
+
+
+async def down_group(client: TelegramClient, chat_id, message_range: dict, from_user, prefix) -> bool:
     chat_id = await get_chat_id(client, chat_id)
     target_user_ids = await parse_user_ids(client, from_user)
-    channel_title, messages = await get_history_message(client, chat_id, plus_func, from_user_ids=target_user_ids)
+    channel_title, messages = await get_history_message(client, chat_id, message_range, from_user_ids=target_user_ids)
+    counts = Counter()
     async for message in messages:
         if message is None:
-            print('慢了一步，消息已被删除')
+            print('消息已删除或不可用，跳过')
+            counts[DownloadResult.SKIPPED] += 1
             continue
-
         if not isinstance(message.media, (MessageMediaDocument, MessageMediaPhoto)):
             continue
-
         if isinstance(message.media, MessageMediaDocument) and any(
-                isinstance(attr, DocumentAttributeSticker) for attr in message.media.document.attributes):
+                isinstance(attr, DocumentAttributeSticker)
+                for attr in getattr(message.media.document, 'attributes', ())):
             continue
-
-        await download_file(
-            client=client,
-            channel_title=channel_title,
-            channel_id=chat_id,
-            message=message,
-            prefix=prefix
-        )
-    print(channel_title, '全部下载完成')
+        result = await download_file(client, channel_title, chat_id, message, prefix=prefix)
+        counts[result] += 1
+    print(f'{channel_title}：下载成功 {counts[DownloadResult.DOWNLOADED]}，'
+          f'跳过 {counts[DownloadResult.SKIPPED]}，失败 {counts[DownloadResult.FAILED]}')
+    return not counts[DownloadResult.FAILED]

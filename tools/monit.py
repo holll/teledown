@@ -1,7 +1,7 @@
-from telethon import TelegramClient, events
+from telethon import TelegramClient, events, utils
 
 from tools.down_file import download_file
-from tools.tool import get_chat_title, parse_user_ids
+from tools.tool import get_chat_title, matches_sender, parse_user_ids, UserAbort
 
 
 async def start_monitor(client: TelegramClient, channel_ids: list[str], from_user=None, prefix=None):
@@ -14,15 +14,17 @@ async def start_monitor(client: TelegramClient, channel_ids: list[str], from_use
         except Exception as e:
             print(f"无法获取频道 {channel_id}: {e}")
             continue
-        channels.append(channel.id)
-        channel_title_map[channel.id] = await get_chat_title(client, channel.id)
+        cid = utils.get_peer_id(channel)
+        channels.append(cid)
+        channel_title_map[cid] = await get_chat_title(client, cid)
 
+    if not channels:
+        raise UserAbort('没有可监控的频道')
     target_user_ids = await parse_user_ids(client, from_user)
 
     @client.on(events.NewMessage(chats=channels))
     async def event_handler(event):
-        sender_id = event.message.sender_id
-        if target_user_ids and sender_id not in target_user_ids:
+        if not matches_sender(event.message.sender_id, target_user_ids):
             return
 
         chat_id = event.chat_id

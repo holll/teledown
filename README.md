@@ -39,7 +39,7 @@ ALIAS=-100123456:给指定频道设置显示名
 
 ## 依赖安装教程<a id="jump2"></a>
 
-基础运行环境：Python 3.8+。
+从源码运行建议使用 Python 3.12（与发布构建一致）。代码使用 Python 3.9 引入的内置泛型，不支持 Python 3.8。
 
 1. 安装基础依赖（必需）
 
@@ -47,9 +47,9 @@ ALIAS=-100123456:给指定频道设置显示名
 pip3 install -r requirements.txt
 ```
 
-2. 如果需要开启代理参数 `--proxy`，请额外安装 `python-socks`（可按需手动执行 `pip3 install python-socks`）。
+2. 代理参数 `--proxy` 使用基础依赖中已包含的 `python-socks`，无需另外安装 PySocks。
 
-3. 上传功能需要的附加依赖（可选）：
+3. 上传功能需要的附加依赖（可选，MoviePy 仅支持 2.x）：
 
 ```bash
 pip3 install -r requirements_upload.txt
@@ -113,14 +113,27 @@ python main.py refresh
 下载两个频道的全部文件，并只保留文件名前缀为 `report` 的文件：
 
 ```bash
-python main.py download -id 123456789|https://t.me/example_channel/1 --prefix "report*"
+python main.py download -id '123456789|222222222' --prefix "report*"
 ```
 
-仅下载指定用户的消息范围，示例中下载 `@someone` 在频道 1111 里的消息 10~200：
+`download --range` 按频道内的**消息 ID**筛选，不是日期或条数：
+
+| 写法 | 筛选范围 |
+| --- | --- |
+| `">100"` / `"<100"` | 大于 / 小于 100，不含 100；`">0"` 是默认值，表示全部 |
+| `100` / `=100` | 只取消息 100 |
+| `1..100` | 闭区间，取 ID 1 到 100（含两端）；`100..100` 只取消息 100 |
+| `1,5,100` | 只取列出的消息 |
+
+旧写法 `s1s100` 和 `s1..100` 已移除。若要保留旧版开区间 `1..100` 的结果，新版写 `2..99`。`<` 和 `>` 在命令行中应加引号，避免被 Shell 当成重定向。
+
+下载频道 11111 内消息 ID 10 到 200（含两端）中符合发送者筛选的文件：
 
 ```bash
-python main.py download -id 1111 -user @someone,@another --range 10..200
+python main.py download -id 11111 -user @someone,@another --range 10..200
 ```
+
+指定 `-user` 时，标识无法解析就报错，不会改成下载所有人的消息；发送者未知的消息也不会通过该过滤。下载结束会统计成功、跳过和失败数；单文件失败不阻止后续下载，但命令最终返回非零退出码。落盘时，频道目录名和附件文件名里的路径分隔符和其他不安全字符会被替换。
 
 上传本地目录的文件到多个频道并在完成后删除源文件：
 
@@ -144,10 +157,14 @@ python main.py monit -id 3333,4444 -user @someone,@another --prefix "*.pdf"
 
 `build.sh` 支持两种构建变体，CI（`.github/workflows/build.yml`）会为 Linux 和 Windows 各构建一份：
 
-| 变体 | 产物名 | 说明 | Linux 体积 |
+| 变体 | 产物名 | 说明 | Linux amd64 本地构建参考体积 |
 | --- | --- | --- | --- |
-| 全功能版 | `teledown-<平台>-<架构>` | 含 `upload`，打包 moviepy / Pillow / python-magic（内含 ffmpeg） | ≈111 MiB |
-| 精简版 | `teledown-noupload-<平台>-<架构>` | 不含 `upload`（执行时提示不支持），剔除 moviepy / imageio / PIL 及其自带 ffmpeg | ≈39 MiB |
+| 全功能版 | `teledown-<平台>-<架构>` | 含 `upload`；视频上传使用外部 FFmpeg | ≈41 MiB |
+| 精简版 | `teledown-noupload-<平台>-<架构>` | 不含 `upload`（执行时提示不支持）；不需要 FFmpeg | ≈20 MiB |
+
+两个变体均不内置 FFmpeg。下载、监控、普通文件上传不需要 FFmpeg；上传视频或运行全功能版自检前，请安装 FFmpeg（Debian/Ubuntu：`sudo apt install ffmpeg`；Windows：`winget install --id Gyan.FFmpeg -e`），确认 `ffmpeg -version` 可运行。也可以通过环境变量 `FFMPEG_BINARY` 指定可执行文件的完整路径。自检使用 `libx264` 生成测试视频。
+
+两个变体均用 Python 标准库导出 CSV，不依赖 pandas，且不打包 Tcl/Tk。实际体积会随平台和依赖版本变化。
 
 本地构建：
 
@@ -158,15 +175,16 @@ UPLOAD_SUPPORT=0 OUTPUT_NAME=teledown-noupload bash build.sh  # 精简版
 
 可用环境变量：`UPLOAD_SUPPORT`（1/0）、`OUTPUT_NAME`、`PYTHON`、`KEEP_COMPILED`。
 
+打包版可离线自检，无需配置或登录：全功能版执行 `teledown self-test full`，无上传版执行 `teledown-noupload self-test noupload`（用实际可执行文件名替换命令名）。全功能版会生成短视频并验证 MIME 识别和缩略图提取；无上传版会检查相关依赖是否已排除。
+
 > Release 里的配置模板名为 `env.example`：GitHub Release 资源名不能以点开头（会被改写成 `default.env.example`），下载后 `cp env.example .env` 即可；从 Actions artifact 里取则是原始的 `dist/.env.example`。
 
 ## 常见错误
 
-1. `AttributeError: module 'socks' has no attribute 'SOCKS5'`，请确认安装了PySocks
-2. `Server sent a very new message with ID xxxxxxxxxxxxxxxxxxx, ignoring`
+1. `Server sent a very new message with ID xxxxxxxxxxxxxxxxxxx, ignoring`
    ，如果你确定没有在多个设备上使用同一个session文件，那么这个问题是由于当前设备时间与telegram服务器时间差距过大（大于30s）。
    解决办法：服务器时间戳是`xxxxxxxxxxxxxxxxxxx >> 32`，请将本地时间戳修改到与服务器时间戳相差30s以内
-3. `Could not find the input entity for XXXXXXX`，请先刷新缓存
+2. `Could not find the input entity for XXXXXXX`，请先刷新缓存
 
 ## Star历史
 

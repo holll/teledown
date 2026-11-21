@@ -1,7 +1,11 @@
 import argparse
+import importlib.util
 import os
 import sys
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Dict, Optional
+from urllib.parse import urlsplit
 
 from dotenv import dotenv_values
 from telethon import TelegramClient
@@ -10,12 +14,19 @@ from tools.down_file import down_group
 from tools.monit import start_monitor
 from tools.sign import batch_sign
 from tools.tool import (run_hook, init_db, md5, print_all_channel, print_group, set_chat_alias,
-                        UserAbort)
-from tools.upload_file import upload_file
+                        parse_message_range, configure_ffmpeg, get_filetype, get_thumb, UserAbort)
+from tools.upload_file import get_video_attributes, upload_file
 
 # Telethon 默认为 60 秒：等待时间超过该值的 FLOOD_WAIT 会直接抛错，
 # 批量下载时会被当作普通异常跳过该文件。放大到 10 分钟以尽量等满服务端要求的间隔。
 FLOOD_SLEEP_THRESHOLD = 600
+
+
+def parse_range_arg(value: str) -> dict:
+    try:
+        return parse_message_range(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
 
 
 def build_parser():
@@ -35,7 +46,8 @@ def build_parser():
     download_parser.add_argument('-id', required=True, help='频道ID，多个频道用|或,分隔')
     download_parser.add_argument('-user', help='指定下载的用户，支持用逗号或|分隔多个用户，默认下载所有用户',
                                  default=None)
-    download_parser.add_argument('--range', default='>0', help='下载范围，默认">0"表示所有消息')
+    download_parser.add_argument('--range', type=parse_range_arg, default='>0',
+                                 help='消息 ID 范围：>N、<N、N（或 =N）、A..B（含两端）、N,M；默认 >0')
     download_parser.add_argument('--prefix', help='通配符，文件名前缀', default=None)
 
     upload_parser = subparsers.add_parser('upload', help='上传文件')
@@ -52,6 +64,9 @@ def build_parser():
     monit_parser.add_argument('-id', required=True, help='频道ID，多个频道用逗号分隔')
     monit_parser.add_argument('-user', help='只监控指定用户的消息，支持用逗号或|分隔多个用户', default=None)
     monit_parser.add_argument('--prefix', help='仅下载匹配通配符的文件名前缀', default=None)
+
+    self_test_parser = subparsers.add_parser('self-test', help='离线检查打包版，无需配置或登录')
+    self_test_parser.add_argument('variant', choices=['full', 'noupload'], help='要验证的构建变体')
 
     return parser
 
@@ -160,20 +175,37 @@ async def handle_sign(client: TelegramClient, args):
 
 async def handle_download(client: TelegramClient, args):
     """下载频道文件，支持频道id和t.me链接，支持下载范围和用户过滤"""
-    if 't.me' in args.id:
-        # 从链接中提取频道ID和消息ID
-        # 支持格式：https://t.me/xxx/123、https://t.me/c/CHAT_ID/MSG_ID、https://t.me/c/CHAT_ID/TOPIC_ID/MSG_ID
-        parts = [p for p in args.id.split('/') if p and p not in ('https:', 'http:', 't.me', 'c')]
-        if len(parts) >= 2:
-            channel_id = parts[0]   # 频道标识始终是第一段（用户名或数字ID），中间的话题ID自动忽略
-            plus_func = '=' + parts[-1]
-        else:
-            print(f"无法解析 t.me 链接: {args.id}")
-            return
+    target = args.id.strip()
+    if target.lower().startswith(('https://', 'http://', 't.me/')):
+        try:
+            url = urlsplit('https://' + target if target.lower().startswith('t.me/') else target)
+            parts = url.path.strip('/').split('/')
+            if parts[0] == 'c':
+                parts = parts[1:]
+            if url.netloc.lower() != 't.me' or not 2 <= len(parts) <= 3 or not all(parts):
+                raise ValueError('不是有效的 Telegram 消息链接')
+            channels = [parts[0]]
+            message_range = parse_message_range('=' + parts[-1])
+        except ValueError as exc:
+            raise UserAbort(f'无法解析 t.me 消息链接：{exc}') from exc
     else:
-        channel_id, plus_func = args.id, args.range
-    for cid in channel_id.split('|'):
-        await down_group(client, cid, plus_func, args.user, args.prefix)
+        channels = [part.strip() for part in target.replace('|', ',').split(',')]
+        if not all(channels):
+            raise UserAbort('-id 不能为空，也不能包含空的频道标识')
+        message_range = args.range
+
+    failed = False
+    for cid in channels:
+        try:
+            if not await down_group(client, cid, message_range, args.user, args.prefix):
+                failed = True
+        except UserAbort:
+            raise
+        except Exception as exc:
+            failed = True
+            print(f'频道 {cid} 下载失败：{type(exc).__name__}: {exc}', file=sys.stderr)
+    if failed:
+        raise UserAbort('本次下载有失败项，请检查各频道的输出')
 
 
 async def handle_upload(client: TelegramClient, args):
@@ -194,10 +226,46 @@ async def handle_monit(client: TelegramClient, args):
     await client.run_until_disconnected()
 
 
+def check_build_variant(variant: str) -> None:
+    excluded = ['pandas', 'tkinter', '_tkinter']
+    if variant == 'noupload':
+        excluded.extend(('moviepy', 'imageio', 'imageio_ffmpeg', 'PIL', 'magic', 'numpy'))
+    if getattr(sys, 'frozen', False):
+        bundled = [name for name in excluded if importlib.util.find_spec(name) is not None]
+        if bundled:
+            raise RuntimeError(f'{variant} 构建意外包含：{", ".join(bundled)}')
+    if variant == 'noupload':
+        return
+
+    configure_ffmpeg()
+    from moviepy import ColorClip
+
+    with TemporaryDirectory(prefix='teledown-self-test-') as temp_dir:
+        sample = str(Path(temp_dir) / 'sample.mp4')
+        with ColorClip((32, 32), color=(0, 0, 0), duration=0.5) as clip:
+            clip.write_videofile(sample, fps=4, codec='libx264', audio=False, logger=None, threads=1)
+        mime_type = get_filetype(sample)
+        if not mime_type.startswith('video/'):
+            raise RuntimeError(f'视频文件 MIME 识别错误：{mime_type}')
+        motion = get_video_attributes(sample)
+        if abs(motion.duration - 0.5) > 0.01 or (motion.w, motion.h) != (32, 32):
+            raise RuntimeError(f'视频属性错误：{motion.duration} 秒，{motion.w}×{motion.h}')
+        if not get_thumb(sample).startswith(b'\xff\xd8'):
+            raise RuntimeError('视频缩略图不是 JPEG')
+
+
 def main():
     # ================= 参数解析 =================
     parser = build_parser()
     args = parser.parse_args()
+    if args.command == 'self-test':
+        try:
+            check_build_variant(args.variant)
+        except Exception as exc:
+            print(f'构建自检失败：{type(exc).__name__}: {exc}', file=sys.stderr)
+            sys.exit(1)
+        print(f'构建自检通过：{args.variant}')
+        return
 
     # ================= 读取配置文件 =================
     config = load_config(args.config)
