@@ -5,6 +5,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"teledown-go/tools"
 )
@@ -32,13 +33,13 @@ func LoadConfig(path string) (*Config, error) {
 	if apiIDRaw == "" || raw["api_hash"] == "" {
 		return nil, fmt.Errorf("请在 %s 中填写 api_id 与 api_hash", path)
 	}
-	apiID, err := strconv.Atoi(apiIDRaw)
-	if err != nil {
-		return nil, fmt.Errorf("配置项 api_id 需要为整数，当前为 %q", apiIDRaw)
+	apiID, err := strconv.ParseInt(apiIDRaw, 10, 32)
+	if err != nil || apiID <= 0 {
+		return nil, fmt.Errorf("配置项 api_id 需要为正的 32 位整数，当前为 %q", apiIDRaw)
 	}
 
 	cfg := &Config{
-		APIID:    apiID,
+		APIID:    int(apiID),
 		APIHash:  raw["api_hash"],
 		Phone:    raw["phone"],
 		Password: raw["password"],
@@ -91,12 +92,14 @@ func parseEnvFile(path string) (map[string]string, error) {
 	}
 
 	out := make(map[string]string)
-	for _, line := range strings.Split(string(data), "\n") {
+	for _, line := range strings.Split(strings.TrimPrefix(string(data), "\ufeff"), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		line = strings.TrimPrefix(line, "export ")
+		if rest, ok := strings.CutPrefix(line, "export"); ok && len(rest) > 0 && (rest[0] == ' ' || rest[0] == '\t') {
+			line = strings.TrimSpace(rest)
+		}
 
 		key, value, ok := strings.Cut(line, "=")
 		if !ok {
@@ -104,14 +107,8 @@ func parseEnvFile(path string) (map[string]string, error) {
 			continue
 		}
 		key = strings.ToLower(strings.TrimSpace(key))
-		value = strings.TrimSpace(value)
-		if len(value) >= 2 {
-			if (value[0] == '"' && value[len(value)-1] == '"') || (value[0] == '\'' && value[len(value)-1] == '\'') {
-				value = value[1 : len(value)-1]
-			}
-		}
 		if key != "" {
-			out[key] = value
+			out[key] = parseEnvValue(value)
 		}
 	}
 
@@ -119,4 +116,35 @@ func parseEnvFile(path string) (map[string]string, error) {
 		return nil, fmt.Errorf("配置文件 %s 为空或无法解析", path)
 	}
 	return out, nil
+}
+
+// parseEnvValue preserves literal hashes within quoted values and unquoted
+// hashes without preceding whitespace (e.g. a password ending in "#abc").
+func parseEnvValue(value string) string {
+	value = strings.TrimSpace(value)
+	if len(value) > 0 && (value[0] == '\'' || value[0] == '"') {
+		quote := value[0]
+		for i := 1; i < len(value); i++ {
+			if value[i] == '\\' && i+1 < len(value) && (value[i+1] == quote || value[i+1] == '\\') {
+				i++
+				continue
+			}
+			if value[i] == quote {
+				tail := strings.TrimSpace(value[i+1:])
+				if tail == "" || strings.HasPrefix(tail, "#") {
+					return strings.NewReplacer(`\`+string(quote), string(quote), `\\`, `\`).Replace(value[1:i])
+				}
+				return value
+			}
+		}
+		return value
+	}
+	previousSpace := false
+	for i, r := range value {
+		if r == '#' && previousSpace {
+			return strings.TrimSpace(value[:i])
+		}
+		previousSpace = unicode.IsSpace(r)
+	}
+	return value
 }

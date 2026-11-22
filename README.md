@@ -12,7 +12,7 @@
 |---|---|
 | 会话文件 | `<账号标识>.session`：Telethon 同构的 SQLite 库（见「会话存储」一节），账号标识取 md5 的**前 16 位**（Python 版是完整 32 位，文件名不同所以两边可以同时存在）。格式与 Telethon 通用，改个名就能给 Python 版用 |
 | 数字 ID 解析 | 会先查持久化的 peer 缓存，未命中才扫一次会话列表拿 `access_hash`；账号未加入该会话则无法解析 |
-| `--range` 单选 | 支持 `100` 与 `=100` 两种写法；Python 版实际只认 `=100`（`100` 会被误解析成 ID 0） |
+| `--range` | 支持 `100` 与 `=100` 单选；`100..200` 包含两个端点，与 Python v1.2.3 一致 |
 | `--prefix ""` | 视为「全部匹配」（等价 Python 的 `--prefix` 不传）；Python 版传空串会导致全部不匹配。Windows 下与 Python 的 `fnmatch` 一样**忽略大小写**（`*.MP4` 能匹配 `a.mp4`），其它平台区分大小写 |
 | `--proxy` 写法 | 认 `socks5://`、`socks5h://` 与不带 scheme 的 `host:port`；**不写端口时补 1080**（`proxy.FromURL` 的默认值，与 Python 的 python-socks 一致）。Python 版走 `python_socks`，两者都支持 `user:pass@` |
 | 下载顺序 | Go 版从**最新**的消息开始下载；Python 版默认 `reverse=True, min_id=1`，从**最早**的开始 |
@@ -143,7 +143,7 @@ PASSWORD=你的两步验证密码
 | `<100` | 消息 ID 小于 100 |
 | `100` / `=100` | 单条消息 |
 | `1,2,3` | 多条消息 |
-| `10..200` / `s10s200` | 区间 |
+| `10..200` | 闭区间，包含消息 ID 10 和 200；旧写法 `s10s200` 不再支持 |
 | 省略（默认 `>0`） | 全部消息 |
 
 ### 按日期过滤
@@ -300,7 +300,8 @@ gotd 默认不处理 `FLOOD_WAIT`，会直接把 `rpc error code 420: FLOOD_WAIT
 - **不支持断点续传**：下载失败或中断时会删掉 `.downloading` 临时文件，下次从 0 开始。`ResolveSavePath` 只能做「文件名 + 大小」判重，做不到「接着下」。
   gotd 的 `downloader` 没有按偏移续传的入口（`reader.offset` 从 0 起、`Builder` 也没有 `WithOffset`），`Stream` 顺序写、`Parallel` 只按绝对偏移落盘但仍从 0 请求全部数据。要做的话分片读取层不用自己写——`gotd/contrib` 的 `tg_io.ChunkSource`（内部即 `upload.getFile{Offset, Limit}` + `precise`）配 `partio.Streamer.StreamAt(ctx, skip, w)` 已经能从任意字节继续（该路径请求不带 `cdn_supported`，是主 DC 单路，也没有分片哈希校验）——代价是失去 CDN 加速、`WithVerify` 校验和 `-threads` 并发，因此暂不引入。
 - 会话文件的**格式**与 Python 版通用，但没实现 `session.TelethonSession`，所以不能直接复用 Python 版的 StringSession（那是另一套纯字符串编码）。
-- 上传视频依赖外部 `ffprobe` 与 `ffmpeg`：缺 `ffprobe` 时无视频属性（不可边下边播），缺 `ffmpeg` 时无缩略图，两种情况都会提示并继续上传。
+- 上传视频依赖外部 `ffprobe` 与 `ffmpeg`：无法读取时长或尺寸时按普通文件发送；只缺 `ffmpeg` 时仍保留视频属性。目录上传跳过符号链接和其他非普通文件。
+- 下载完成后通过硬链接把同目录的临时文件发布为最终文件，防止覆盖其他进程刚保存的同名文件；请使用支持硬链接的文件系统（例如 NTFS 或 ext4，不支持 FAT/exFAT）。
 - 缩略图固定取第 0 帧；Python 版同样取第 0 帧，行为一致。
 - `.env` 里的 `ALIAS`（频道显示名）**尚未解析**，下载目录名一律用 Telegram 返回的频道标题。
 

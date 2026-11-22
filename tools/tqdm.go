@@ -66,12 +66,17 @@ func (p *progressBar) Add(n int64) {
 // Chunk 实现 uploader.Progress，供上传器回调。
 //
 // gotd 的 bigLoop 会用 u.threads 个 goroutine 并发回调（回调本身没有加锁），所以：
-//   - state.Uploaded 已是累计值，直接覆盖即可；用「读 current 再算 delta」的写法在并发下
-//     会让多个回调读到同一个旧值，把同一批字节重复计入，百分比能超过 100%；
+//   - state.Uploaded 已是累计值，但回调可能乱序；只用 CAS 更新到更大的累计值，
+//     避免旧回调覆盖新进度，也不在客户端重复计数；
 //   - 不在这里写 p.total：构造函数已按文件大小设好，再写就与 report 的读构成数据竞争。
 func (p *progressBar) Chunk(_ context.Context, state uploader.ProgressState) error {
-	p.current.Store(state.Uploaded)
-	p.report(state.Uploaded)
+	// 并发回调可以晚于更新的累计值到达，不能让进度倒退。
+	for old := p.current.Load(); state.Uploaded > old; old = p.current.Load() {
+		if p.current.CompareAndSwap(old, state.Uploaded) {
+			p.report(p.current.Load())
+			break
+		}
+	}
 	return nil
 }
 

@@ -529,3 +529,40 @@ func writeFile(t *testing.T, path, content string) {
 		t.Fatal(err)
 	}
 }
+
+func TestSessionStoreEscapesFilename(t *testing.T) {
+	// '?' is not permitted in Windows filenames; '#' and '%' are portable.
+	path := filepath.Join(t.TempDir(), "中文 #100%", "account #%.session")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	s, err := OpenSessionStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("database was not created at requested path: %v", err)
+	}
+	if err := s.SaveContactsHash(ctx, 42); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := reopen(t, s).GetContactsHash(ctx); err != nil || got != 42 {
+		t.Fatalf("reopen hash = %d, %v; want 42", got, err)
+	}
+}
+
+func TestSessionStoreCanceledOperations(t *testing.T) {
+	s := newTestStore(t)
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	if err := s.SaveContactsHash(canceled, 42); !errors.Is(err, context.Canceled) {
+		t.Errorf("canceled write = %v", err)
+	}
+	if _, _, err := s.Find(canceled, channelKey); !errors.Is(err, context.Canceled) {
+		t.Errorf("canceled read = %v", err)
+	}
+	if got, err := s.GetContactsHash(ctx); err != nil || got != 0 {
+		t.Errorf("canceled write changed hash: %d, %v", got, err)
+	}
+}

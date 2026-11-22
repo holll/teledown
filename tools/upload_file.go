@@ -8,11 +8,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
+	"math"
 	"mime"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -47,6 +48,9 @@ func Upload(ctx context.Context, api *tg.Client, peer *Peer, opt UploadOptions) 
 			return ctx.Err()
 		}
 		if err := uploadOne(ctx, api, peer.Input, path, opt); err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 			fmt.Printf("上传出错 %s: %v\n", filepath.Base(path), err)
 			failed++
 			continue
@@ -66,25 +70,38 @@ func Upload(ctx context.Context, api *tg.Client, peer *Peer, opt UploadOptions) 
 }
 
 func uploadOne(ctx context.Context, api *tg.Client, peer tg.InputPeerClass, path string, opt UploadOptions) error {
-	info, err := os.Stat(path)
+	path, err := filepath.Abs(path)
+	if err != nil {
+		return fmt.Errorf("获取上传文件的绝对路径: %w", err)
+	}
+	info, err := os.Lstat(path)
 	if err != nil {
 		return fmt.Errorf("读取文件信息失败: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("不上传非普通文件: %s", path)
 	}
 	name := filepath.Base(path)
 	mimeType := detectMIME(path)
 
-	var videoAttr tg.DocumentAttributeClass
+	var videoAttr *tg.DocumentAttributeVideo
 	isVideo := strings.HasPrefix(mimeType, "video/")
-	var thumbData []byte
 	if isVideo {
-		if attr := probeVideoAttributes(path); attr != nil {
-			// 带视频属性上传，接收端才能边下边播
-			videoAttr = attr
-		} else {
-			fmt.Printf("提示：未能读取视频元信息（缺少 ffprobe？），%s 将以普通文件上传\n", name)
+		videoAttr = probeVideoAttributes(ctx, path)
+		if ctx.Err() != nil {
+			return ctx.Err()
 		}
+		if videoAttr == nil {
+			fmt.Printf("提示：未能读取视频元信息（请检查 ffprobe 与视频文件），%s 将以普通文件上传\n", name)
+		}
+	}
 
-		thumb, err := ExtractThumbnail(path)
+	var thumbData []byte
+	if videoAttr != nil {
+		thumb, err := ExtractThumbnail(ctx, path)
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		switch {
 		case err != nil:
 			// 缩略图属于锦上添花，失败不阻断上传
@@ -133,7 +150,8 @@ func uploadOne(ctx context.Context, api *tg.Client, peer tg.InputPeerClass, path
 	// random_id 生成（RandomID 为 0 时自动补）都由它负责，不必手拼请求。
 	doc := message.UploadedDocument(uploaded, styling.Plain(caption)).
 		Filename(name).
-		MIME(mimeType)
+		MIME(mimeType).
+		ForceFile(isVideo && videoAttr == nil)
 	if videoAttr != nil {
 		doc = doc.Attributes(videoAttr)
 	}
@@ -157,11 +175,14 @@ func uploadOne(ctx context.Context, api *tg.Client, peer tg.InputPeerClass, path
 
 // collectFiles 收集待上传文件，目录递归收集并按路径排序（与 Python 版一致）。
 func collectFiles(path string) (files []string, isDir bool, err error) {
-	info, err := os.Stat(path)
+	info, err := os.Lstat(path)
 	if err != nil {
 		return nil, false, fmt.Errorf("路径 %s 不存在或无法访问: %w", path, err)
 	}
 	if !info.IsDir() {
+		if !info.Mode().IsRegular() {
+			return nil, false, fmt.Errorf("不上传非普通文件: %s", path)
+		}
 		return []string{path}, false, nil
 	}
 
@@ -169,7 +190,7 @@ func collectFiles(path string) (files []string, isDir bool, err error) {
 		if err != nil {
 			return err
 		}
-		if !d.IsDir() {
+		if d.Type().IsRegular() {
 			files = append(files, p)
 		}
 		return nil
@@ -177,17 +198,15 @@ func collectFiles(path string) (files []string, isDir bool, err error) {
 	if err != nil {
 		return nil, true, fmt.Errorf("遍历目录失败: %w", err)
 	}
-	sort.Strings(files)
+	slices.Sort(files)
 	return files, true, nil
 }
 
 // detectMIME 优先按扩展名判断，识别不出时退回通用二进制类型。
 func detectMIME(path string) string {
 	if t := mime.TypeByExtension(filepath.Ext(path)); t != "" {
-		if i := strings.Index(t, ";"); i >= 0 {
-			return strings.TrimSpace(t[:i])
-		}
-		return t
+		base, _, _ := strings.Cut(t, ";")
+		return strings.TrimSpace(base)
 	}
 	return "application/octet-stream"
 }
@@ -195,10 +214,13 @@ func detectMIME(path string) string {
 // ffprobeResult 只取需要的字段。
 type ffprobeResult struct {
 	Streams []struct {
-		CodecType string `json:"codec_type"`
-		Width     int    `json:"width"`
-		Height    int    `json:"height"`
-		Duration  string `json:"duration"`
+		CodecType   string `json:"codec_type"`
+		Width       int    `json:"width"`
+		Height      int    `json:"height"`
+		Duration    string `json:"duration"`
+		Disposition struct {
+			AttachedPic int `json:"attached_pic"`
+		} `json:"disposition"`
 	} `json:"streams"`
 	Format struct {
 		Duration string `json:"duration"`
@@ -207,12 +229,8 @@ type ffprobeResult struct {
 
 // probeVideoAttributes 用 ffprobe 读取时长与分辨率，生成视频属性。
 // 未安装 ffprobe 或读取失败时返回 nil，调用方按普通文件上传。
-func probeVideoAttributes(path string) *tg.DocumentAttributeVideo {
-	if _, err := exec.LookPath("ffprobe"); err != nil {
-		return nil
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+func probeVideoAttributes(ctx context.Context, path string) *tg.DocumentAttributeVideo {
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 
 	var out bytes.Buffer
@@ -229,27 +247,34 @@ func probeVideoAttributes(path string) *tg.DocumentAttributeVideo {
 		return nil
 	}
 
-	var w, h int
-	durationRaw := result.Format.Duration
+	return videoAttributes(result)
+}
+
+func videoAttributes(result ffprobeResult) *tg.DocumentAttributeVideo {
 	for _, s := range result.Streams {
-		if s.CodecType != "video" {
+		if s.CodecType != "video" || s.Disposition.AttachedPic != 0 || s.Width <= 0 || s.Height <= 0 {
 			continue
 		}
-		w, h = s.Width, s.Height
-		if s.Duration != "" {
-			durationRaw = s.Duration
+		duration := positiveDuration(s.Duration)
+		if duration == 0 {
+			duration = positiveDuration(result.Format.Duration)
 		}
-		break
+		if duration > 0 {
+			return &tg.DocumentAttributeVideo{
+				Duration:          duration,
+				W:                 s.Width,
+				H:                 s.Height,
+				SupportsStreaming: true,
+			}
+		}
 	}
-	duration, err := strconv.ParseFloat(durationRaw, 64)
-	if err != nil || duration <= 0 || w <= 0 || h <= 0 {
-		return nil
-	}
+	return nil
+}
 
-	return &tg.DocumentAttributeVideo{
-		Duration:          duration,
-		W:                 w,
-		H:                 h,
-		SupportsStreaming: true,
+func positiveDuration(raw string) float64 {
+	duration, err := strconv.ParseFloat(raw, 64)
+	if err != nil || math.IsNaN(duration) || math.IsInf(duration, 0) || duration <= 0 {
+		return 0
 	}
+	return duration
 }

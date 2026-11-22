@@ -1,14 +1,8 @@
 package tools
 
-// 本文件对应 Python 版 tools/tool.py 的媒体部分：get_file_id / get_file_name 及 file_reference 刷新。
+// 本文件对应 Python 版 tools/tool.py 的媒体部分：get_file_id / get_file_name。
 
-import (
-	"context"
-	"fmt"
-
-	"github.com/gotd/td/telegram/query"
-	"github.com/gotd/td/tg"
-)
+import "github.com/gotd/td/tg"
 
 // mediaInfo 描述一条消息里可下载的媒体。
 type mediaInfo struct {
@@ -132,22 +126,4 @@ func photoSizeBytes(s tg.PhotoSizeClass) int64 {
 // MessageText 取消息文本，用于推导文件名。
 func MessageText(msg *tg.Message) string {
 	return msg.Message
-}
-
-// refetchMessage 重新拉取消息，用于刷新过期的 file_reference。
-//
-// 走 query 包的 GetMessages 而不是直接调 messages.getMessages：频道消息的 ID 只在
-// 该频道内唯一，messages.getMessages 不认频道（传进来会返回无关消息），
-// query 会按 peer 类型自动分流到 channels.getMessages。
-func refetchMessage(ctx context.Context, api *tg.Client, peer tg.InputPeerClass, msgID int) (*tg.Message, error) {
-	raw, err := query.NewQuery(api).Messages().GetMessages(ctx, peer, msgID)
-	if err != nil {
-		return nil, fmt.Errorf("重新拉取消息 %d 失败: %w", msgID, err)
-	}
-	for _, m := range raw {
-		if msg, ok := m.(*tg.Message); ok && msg.ID == msgID {
-			return msg, nil
-		}
-	}
-	return nil, fmt.Errorf("消息 %d 已不存在", msgID)
 }

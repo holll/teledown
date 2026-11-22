@@ -36,7 +36,7 @@ func TestEachMessageHistoryPagination(t *testing.T) {
 						want = append(want, id)
 					}
 				}
-				want = append(want, 100)
+				want = append(want, 100, 10)
 				calls := 0
 				api := tg.NewClient(messageInvoker(func(_ context.Context, in bin.Encoder, out bin.Decoder) error {
 					req, ok := in.(*tg.MessagesGetHistoryRequest)
@@ -50,12 +50,12 @@ func TestEachMessageHistoryPagination(t *testing.T) {
 					if calls == 1 {
 						wantOffset = 101
 					}
-					if req.OffsetID != wantOffset || req.Limit != 100 || req.MinID != 10 || req.MaxID != 250 || req.Peer != peer {
+					if req.OffsetID != wantOffset || req.Limit != 100 || req.MinID != 9 || req.MaxID != 251 || req.Peer != peer {
 						t.Fatalf("unexpected history request: %+v; want offset %d", req, wantOffset)
 					}
 					rows := page
 					if calls == 1 {
-						rows = []tg.MessageClass{&tg.Message{ID: 100, Date: 1000}}
+						rows = []tg.MessageClass{&tg.Message{ID: 100, Date: 1000}, &tg.Message{ID: 10, Date: 1000}, &tg.Message{ID: 9, Date: 1000}}
 					}
 					calls++
 					box := out.(*tg.MessagesMessagesBox)

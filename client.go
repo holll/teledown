@@ -5,9 +5,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -84,10 +86,25 @@ func socks5Dialer(raw string) (dcs.DialFunc, error) {
 
 	u, err := url.Parse(addr)
 	if err != nil {
-		return nil, fmt.Errorf("代理地址 %q 无法解析: %w", raw, err)
+		// url.Parse errors can contain the complete URL including its password.
+		return nil, errors.New("无法解析 SOCKS5 代理地址，请检查格式及账号密码的 URL 编码")
 	}
-	if u.Host == "" {
-		return nil, fmt.Errorf("代理地址 %q 缺少主机名", raw)
+	if u.Scheme != "socks5" && u.Scheme != "socks5h" {
+		return nil, errors.New("代理协议必须为 socks5 或 socks5h")
+	}
+	if u.Hostname() == "" {
+		return nil, errors.New("代理地址缺少主机名")
+	}
+	if u.Path != "" || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || strings.Contains(addr, "#") {
+		return nil, errors.New("SOCKS5 代理地址不支持路径、查询参数或片段")
+	}
+	if strings.Contains(u.Hostname(), ":") && !strings.HasPrefix(u.Host, "[") {
+		return nil, errors.New("IPv6 代理主机名必须用方括号包围")
+	}
+	if rawPort := u.Port(); rawPort != "" {
+		if port, err := strconv.ParseUint(rawPort, 10, 16); err != nil || port == 0 {
+			return nil, errors.New("SOCKS5 代理端口必须在 1 到 65535 之间")
+		}
 	}
 
 	d, err := proxy.FromURL(u, proxy.Direct)
@@ -161,12 +178,16 @@ func Authorize(ctx context.Context, client *telegram.Client, cfg *Config) error 
 // configCredentials 提供认证流程里的手机号与两步验证密码。
 // 交互部分（验证码读取、位数校验、条款与注册流程）由 contrib/auth/terminal 负责。
 type configCredentials struct {
-	cfg *Config
+	cfg          *Config
+	readPassword func() (string, error)
 }
 
 var _ contribauth.Credentials = configCredentials{}
 
-func (c configCredentials) Phone(context.Context) (string, error) {
+func (c configCredentials) Phone(ctx context.Context) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	if c.cfg.Phone == "" {
 		return "", errors.New("请在 .env 中填写 phone")
 	}
@@ -177,11 +198,21 @@ func (c configCredentials) Phone(context.Context) (string, error) {
 //
 // 不能用 auth.Constant：它会把配置里的密码（哪怕是空串）直接提交给服务端，
 // 启用两步验证的账号会得到一个含糊的「invalid password」而不是提示补密码。
-func (c configCredentials) Password(context.Context) (string, error) {
+func (c configCredentials) Password(ctx context.Context) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	if c.cfg.Password != "" {
 		return c.cfg.Password, nil
 	}
-	return promptSecret("该账号启用了两步验证，请输入密码（不回显）: ")
+	if c.readPassword == nil {
+		return "", errors.New("未配置两步验证密码输入")
+	}
+	value, err := c.readPassword()
+	if ctx.Err() != nil {
+		return "", ctx.Err()
+	}
+	return value, err
 }
 
 // authFlow 组装登录流程：
@@ -192,8 +223,32 @@ func (c configCredentials) Password(context.Context) (string, error) {
 // 不能直接把 terminal.OS() 当 Ask 传：它自带条款 Y/N 与注册（问名/姓）流程，
 // 手机号写错时会把号码往注册流程上带。本工具只用于已登录账号的下载/上传。
 func authFlow(cfg *Config) auth.Flow {
-	ask := contribauth.BuildAsk(newTerminalAuth(), contribauth.NoSignUp())
-	return auth.NewFlow(contribauth.Build(configCredentials{cfg: cfg}, ask), auth.SendCodeOptions{})
+	var input io.Reader = os.Stdin
+	readPassword := func() (string, error) {
+		return promptSecret("该账号启用了两步验证，请输入密码（不回显）: ")
+	}
+	if !term.IsTerminal(int(os.Stdin.Fd())) {
+		// The terminal helper buffers input too. Share the same reader so any
+		// password prefetched while reading the code remains available.
+		input = bufio.NewReader(os.Stdin)
+		readPassword = func() (string, error) {
+			fmt.Print("该账号启用了两步验证，请输入密码: ")
+			return readSecretLine(input)
+		}
+	}
+	termAuth := terminal.New(input, os.Stdout).WithPrinter(chinesePrinter())
+	code := auth.CodeAuthenticatorFunc(func(ctx context.Context, sent *tg.AuthSentCode) (string, error) {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		value, err := termAuth.Code(ctx, sent)
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		return value, err
+	})
+	ask := contribauth.BuildAsk(code, contribauth.NoSignUp())
+	return auth.NewFlow(contribauth.Build(configCredentials{cfg: cfg, readPassword: readPassword}, ask), auth.SendCodeOptions{})
 }
 
 // isSignUpRequired 判断错误链里是否有「服务端要求注册」。
@@ -202,11 +257,6 @@ func authFlow(cfg *Config) auth.Flow {
 func isSignUpRequired(err error) bool {
 	var required *auth.SignUpRequired
 	return errors.As(err, &required)
-}
-
-// newTerminalAuth 构造终端交互式认证，并把提示语换成中文（contrib 自带 catalog 只有英文）。
-func newTerminalAuth() *terminal.Terminal {
-	return terminal.OS().WithPrinter(chinesePrinter())
 }
 
 // chinesePrinter 在 contrib 自带的 catalog（只有英文）上补中文词条。
@@ -242,11 +292,15 @@ func promptSecret(prompt string) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		return strings.TrimSpace(string(raw)), nil
+		return string(raw), nil
 	}
-	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
-	if err != nil {
+	return readSecretLine(os.Stdin)
+}
+
+func readSecretLine(input io.Reader) (string, error) {
+	line, err := bufio.NewReader(input).ReadString('\n')
+	if err != nil && (!errors.Is(err, io.EOF) || line == "") {
 		return "", err
 	}
-	return strings.TrimSpace(line), nil
+	return strings.TrimSuffix(strings.TrimSuffix(line, "\n"), "\r"), nil
 }

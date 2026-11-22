@@ -21,12 +21,8 @@ const thumbnailTimeout = 30 * time.Second
 // ExtractThumbnail 抽取视频首帧并编码为 JPEG。
 // 与 Python 版 tools/tool.py 的 get_thumb 等价，只是改用 ffmpeg 一步到位，
 // 不再需要 moviepy + Pillow。
-func ExtractThumbnail(path string) ([]byte, error) {
-	if _, err := exec.LookPath("ffmpeg"); err != nil {
-		return nil, fmt.Errorf("未找到 ffmpeg: %w", err)
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), thumbnailTimeout)
+func ExtractThumbnail(ctx context.Context, path string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, thumbnailTimeout)
 	defer cancel()
 
 	var (
@@ -34,7 +30,7 @@ func ExtractThumbnail(path string) ([]byte, error) {
 		stderr bytes.Buffer
 	)
 	cmd := exec.CommandContext(ctx, "ffmpeg",
-		"-hide_banner", "-loglevel", "error",
+		"-nostdin", "-hide_banner", "-loglevel", "error",
 		"-i", path,
 		// 取第一帧；scale 用 min() 避免把小于 320 宽的视频放大
 		"-frames:v", "1",
@@ -46,6 +42,9 @@ func ExtractThumbnail(path string) ([]byte, error) {
 	cmd.Stderr = &stderr
 
 	if err := cmd.Run(); err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		msg := stderr.String()
 		if len(msg) > 200 {
 			msg = msg[:200]

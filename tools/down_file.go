@@ -4,11 +4,14 @@ package tools
 
 import (
 	"context"
+	"crypto/rand"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 
+	"github.com/gotd/td/constant"
 	"github.com/gotd/td/telegram"
 	"github.com/gotd/td/telegram/downloader"
 	"github.com/gotd/td/tg"
@@ -21,6 +24,8 @@ type DownloadOptions struct {
 	Prefix   string
 	SavePath string
 	Threads  int
+	// SenderIDs are marked Telegram peer IDs. Nil disables filtering; an empty set matches nobody.
+	SenderIDs map[int64]struct{}
 	// Manager 用于在 access_hash 失效时清除本地缓存，可为 nil。
 	Manager *PeerManager
 }
@@ -28,11 +33,19 @@ type DownloadOptions struct {
 // Download 按范围下载频道内所有可下载媒体。
 func Download(ctx context.Context, client *telegram.Client, peer *Peer, opt DownloadOptions) error {
 	api := client.API()
-	// 频道根目录：save_path/标题-ID，其下再按消息月份分子目录（见 MonthDir）
-	dir := filepath.Join(opt.SavePath, fmt.Sprintf("%s-%d", peer.Title, peer.ID))
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	savePath := opt.SavePath
+	if savePath == "" {
+		savePath = "."
+	}
+	if err := os.MkdirAll(savePath, 0o755); err != nil {
 		return fmt.Errorf("创建保存目录失败: %w", err)
 	}
+	root, err := os.OpenRoot(savePath)
+	if err != nil {
+		return fmt.Errorf("打开保存目录失败: %w", err)
+	}
+	defer root.Close()
+	channel := safeDownloadComponent(fmt.Sprintf("%s-%d", peer.Title, peer.ID))
 
 	var (
 		total     int
@@ -42,12 +55,12 @@ func Download(ctx context.Context, client *telegram.Client, peer *Peer, opt Down
 		firstErr  error
 	)
 
-	err := EachMessage(ctx, api, peer.Input, opt.Range, opt.Date.Since, func(msg *tg.Message) error {
+	err = EachMessage(ctx, api, peer.Input, opt.Range, opt.Date.Since, func(msg *tg.Message) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 		// 日期过滤：下界在遍历层已提前收工，这里兜住按 ID 拉取与上界两种情况
-		if !opt.Date.Contains(msg.Date) {
+		if !opt.Date.Contains(msg.Date) || !matchesSender(opt.SenderIDs, msg.FromID) {
 			return nil
 		}
 		info, ok := ExtractMedia(msg)
@@ -61,20 +74,12 @@ func Download(ctx context.Context, client *telegram.Client, peer *Peer, opt Down
 		}
 		total++
 
-		// 按消息发送月份归档到子目录，同一月份重复创建是幂等的
-		monthDir := filepath.Join(dir, MonthDir(msg.Date))
-		if err := os.MkdirAll(monthDir, 0o755); err != nil {
-			return fmt.Errorf("创建月份目录失败: %w", err)
-		}
-
-		exists, target := ResolveSavePath(filepath.Join(monthDir, name), info.Size)
+		exists, err := saveMedia(ctx, client, root, channel, peer.Input, msg, info, name, opt.Threads)
 		if exists {
-			fmt.Printf("媒体已存在：%s\n", target)
 			skipped++
 			return nil
 		}
-
-		if err := downloadOne(ctx, client, peer.Input, msg, info, target, opt.Threads); err != nil {
+		if err != nil {
 			// 单文件失败不影响其余文件，与 Python 版行为一致
 			fmt.Printf("下载出错 %s: %v\n", name, err)
 			failed++
@@ -106,20 +111,81 @@ func Download(ctx context.Context, client *telegram.Client, peer *Peer, opt Down
 	return nil
 }
 
+func matchesSender(filter map[int64]struct{}, sender tg.PeerClass) bool {
+	if filter == nil {
+		return true
+	}
+	var id constant.TDLibPeerID
+	switch p := sender.(type) {
+	case *tg.PeerUser:
+		id.User(p.UserID)
+	case *tg.PeerChat:
+		id.Chat(p.ChatID)
+	case *tg.PeerChannel:
+		id.Channel(p.ChannelID)
+	default:
+		return false
+	}
+	_, ok := filter[int64(id)]
+	return ok
+}
+
+func ensureDownloadDir(root *os.Root, path string) error {
+	if err := root.Mkdir(path, 0o755); err != nil && !errors.Is(err, os.ErrExist) {
+		return err
+	}
+	info, err := root.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("下载目录不是普通目录: %s", path)
+	}
+	return nil
+}
+
+func saveMedia(ctx context.Context, client *telegram.Client, root *os.Root, channel string, peer tg.InputPeerClass, msg *tg.Message, info *mediaInfo, name string, threads int) (bool, error) {
+	if err := ensureDownloadDir(root, channel); err != nil {
+		return false, err
+	}
+	month := filepath.Join(channel, MonthDir(msg.Date))
+	if err := ensureDownloadDir(root, month); err != nil {
+		return false, err
+	}
+	exists, target, err := resolveSavePath(root.Lstat, filepath.Join(month, name), info.Size)
+	if err != nil {
+		return false, err
+	}
+	if exists {
+		fmt.Printf("媒体已存在：%s\n", filepath.Join(root.Name(), target))
+		return true, nil
+	}
+	return false, downloadOneRoot(ctx, client, peer, msg, info, root, target, threads)
+}
+
 // downloadOne 下载单个媒体：写 .downloading 临时文件，成功后改名。
 // file_reference 过期时重新拉取消息刷新引用并重试一次。
 //
 // gotd 的 downloader 不会自愈过期的 file_reference（只有 CDN 的 token/密钥刷新），
 // 所以这一步重试是文档下载失败后唯一的恢复手段。
-func downloadOne(ctx context.Context, client *telegram.Client, peer tg.InputPeerClass, msg *tg.Message, info *mediaInfo, target string, threads int) (err error) {
-	file, err := os.CreateTemp(filepath.Dir(target), ".teledown-*.downloading")
+func downloadOne(ctx context.Context, client *telegram.Client, peer tg.InputPeerClass, msg *tg.Message, info *mediaInfo, target string, threads int) error {
+	root, err := os.OpenRoot(filepath.Dir(target))
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	return downloadOneRoot(ctx, client, peer, msg, info, root, filepath.Base(target), threads)
+}
+
+func downloadOneRoot(ctx context.Context, client *telegram.Client, peer tg.InputPeerClass, msg *tg.Message, info *mediaInfo, root *os.Root, target string, threads int) (err error) {
+	tmp := filepath.Join(filepath.Dir(target), ".teledown-"+rand.Text()+".downloading")
+	file, err := root.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o600)
 	if err != nil {
 		return fmt.Errorf("创建临时文件失败: %w", err)
 	}
-	tmp := file.Name()
 	defer func() {
 		_ = file.Close()
-		_ = os.Remove(tmp)
+		_ = root.Remove(tmp)
 	}()
 	// 进度条按「一个文件一条」的生命周期：重试共用同一条，用时也只算一次，
 	// 结束后 Finish 把这一行换成汇总行留在终端里。
@@ -131,11 +197,23 @@ func downloadOne(ctx context.Context, client *telegram.Client, peer tg.InputPeer
 	for attempt := 0; attempt < attempts; attempt++ {
 		runErr := runDownload(ctx, client, info.Location, file, info.Name, bar, threads)
 		if runErr == nil {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if info.Size > 0 {
+				written, statErr := file.Stat()
+				if statErr != nil {
+					return fmt.Errorf("检查下载大小失败: %w", statErr)
+				}
+				if written.Size() != info.Size {
+					return fmt.Errorf("下载大小不符：实际 %d，预期 %d", written.Size(), info.Size)
+				}
+			}
 			if closeErr := file.Close(); closeErr != nil {
 				return fmt.Errorf("关闭临时文件失败: %w", closeErr)
 			}
-			if renameErr := os.Rename(tmp, target); renameErr != nil {
-				return fmt.Errorf("重命名临时文件失败: %w", renameErr)
+			if linkErr := root.Link(tmp, target); linkErr != nil {
+				return fmt.Errorf("保存下载文件失败（不会覆盖现有文件）: %w", linkErr)
 			}
 			return nil
 		}
@@ -150,13 +228,22 @@ func downloadOne(ctx context.Context, client *telegram.Client, peer tg.InputPeer
 		// 换行打印，免得被进行中的进度行覆盖掉
 		fmt.Fprintf(os.Stderr, "\n文件引用已过期，重新获取消息后重试: %s\n", info.Name)
 
-		fresh, refetchErr := refetchMessage(ctx, client.API(), peer, msg.ID)
+		var fresh *tg.Message
+		refetchErr := eachMessageByID(ctx, client.API(), peer, []int{msg.ID}, func(candidate *tg.Message) error {
+			if candidate.ID == msg.ID {
+				fresh = candidate
+			}
+			return nil
+		})
 		if refetchErr != nil {
 			return refetchErr
 		}
+		if fresh == nil {
+			return fmt.Errorf("原消息不可用，无法刷新文件引用")
+		}
 		freshInfo, ok := ExtractMedia(fresh)
-		if !ok {
-			return fmt.Errorf("消息刷新后已无可下载媒体")
+		if !ok || freshInfo.FileID != info.FileID || freshInfo.IsSticker {
+			return fmt.Errorf("消息刷新后原媒体已不可用")
 		}
 		info = freshInfo
 	}

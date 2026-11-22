@@ -22,7 +22,7 @@ const (
 	RangeMax               // <n
 	RangeSingle            // n
 	RangeList              // 1,2,3
-	RangeBetween           // 10..200 或 s10s200
+	RangeBetween           // 10..200（含两端）
 )
 
 // MsgRange 描述要处理的消息范围。
@@ -33,95 +33,79 @@ type MsgRange struct {
 	IDs  []int
 }
 
-// ParseRange 解析 --range 参数，规则与 Python 版 get_history_message 一致：
-//
-//	">100"      消息 ID 大于 100
-//	"<100"      消息 ID 小于 100
-//	"100"       单条消息
-//	"1,2,3"     多条消息
-//	"s10s200"   区间 10~200
-//	"10..200"   区间 10~200（自动补 s 前缀）
-//	""          全部
+const maxMessageID = 1<<31 - 1
+
+// ParseRange parses positive message IDs, strict comparisons and closed A..B ranges.
 func ParseRange(raw string) (MsgRange, error) {
 	s := strings.TrimSpace(raw)
-	if s == "" {
-		return MsgRange{Mode: RangeAll}, nil
+	if s == "" || s == ">0" {
+		return MsgRange{}, nil
 	}
-
-	// 与 Python 版一致：先做 .. 到 s 前缀的归一化
-	if strings.Contains(s, "..") && !strings.ContainsAny(s[:1], "><=s") {
-		s = "s" + s
+	parse := func(value string, allowZero bool) (int, error) {
+		value = strings.TrimSpace(value)
+		for _, r := range value {
+			if r < '0' || r > '9' {
+				return 0, fmt.Errorf("无效消息 ID %q", value)
+			}
+		}
+		id, err := strconv.ParseUint(value, 10, 31)
+		if err != nil || id == 0 && !allowZero {
+			return 0, fmt.Errorf("无效消息 ID %q", value)
+		}
+		return int(id), nil
 	}
-
-	// 多选消息 ID
+	if lo, hi, ok := strings.Cut(s, ".."); ok {
+		min, err := parse(lo, true)
+		if err != nil {
+			return MsgRange{}, err
+		}
+		max, err := parse(hi, false)
+		if err != nil {
+			return MsgRange{}, err
+		}
+		if min > max {
+			return MsgRange{}, fmt.Errorf("--range 下限不能大于上限")
+		}
+		return MsgRange{Mode: RangeBetween, Min: min, Max: max}, nil
+	}
 	if strings.Contains(s, ",") {
 		var ids []int
-		for _, part := range strings.Split(s, ",") {
-			id, err := strconv.Atoi(strings.TrimSpace(part))
+		seen := make(map[int]struct{})
+		for part := range strings.SplitSeq(s, ",") {
+			id, err := parse(part, false)
 			if err != nil {
-				return MsgRange{}, fmt.Errorf("--range 中的消息 ID %q 不是数字", part)
+				return MsgRange{}, err
 			}
-			ids = append(ids, id)
-		}
-		if len(ids) == 0 {
-			return MsgRange{}, fmt.Errorf("--range 未解析出任何消息 ID")
+			if _, exists := seen[id]; !exists {
+				ids = append(ids, id)
+				seen[id] = struct{}{}
+			}
 		}
 		return MsgRange{Mode: RangeList, IDs: ids}, nil
 	}
-
-	head := s[:1]
-	switch head {
-	case ">", "<", "=":
-		value, err := strconv.Atoi(s[1:])
+	switch s[0] {
+	case '>':
+		id, err := parse(s[1:], true)
 		if err != nil {
-			return MsgRange{}, fmt.Errorf("--range 参数 %q 不是有效格式", raw)
+			return MsgRange{}, err
 		}
-		switch head {
-		case ">":
-			if value == 0 {
-				return MsgRange{Mode: RangeAll}, nil
-			}
-			return MsgRange{Mode: RangeMin, Min: value}, nil
-		case "<":
-			return MsgRange{Mode: RangeMax, Max: value}, nil
-		default:
-			// "=100"，与 Python 版单选写法一致
-			return MsgRange{Mode: RangeSingle, IDs: []int{value}}, nil
+		if id == 0 {
+			return MsgRange{}, nil
 		}
-	case "s":
-		// 继续走下面的区间解析
+		return MsgRange{Mode: RangeMin, Min: id}, nil
+	case '<':
+		id, err := parse(s[1:], false)
+		if err != nil {
+			return MsgRange{}, err
+		}
+		return MsgRange{Mode: RangeMax, Max: id}, nil
 	default:
-		// 纯数字：单条消息（比 Python 版更直观，Python 会把它误解析成前导字符 + 剩余数字）
-		value, err := strconv.Atoi(s)
+		id, err := parse(strings.TrimPrefix(s, "="), false)
 		if err != nil {
-			return MsgRange{}, fmt.Errorf("--range 参数 %q 不是有效格式", raw)
+			return MsgRange{}, err
 		}
-		return MsgRange{Mode: RangeSingle, IDs: []int{value}}, nil
+		return MsgRange{Mode: RangeSingle, IDs: []int{id}}, nil
 	}
-
-	rest := s[1:]
-	var lowRaw, highRaw string
-	if strings.Contains(rest, "..") {
-		lowRaw, highRaw, _ = strings.Cut(rest, "..")
-	} else {
-		var ok bool
-		lowRaw, highRaw, ok = strings.Cut(rest, "s")
-		if !ok {
-			return MsgRange{}, fmt.Errorf("--range 区间 %q 缺少分隔符，应写成 10..200 或 s10s200", raw)
-		}
-	}
-	low, err := strconv.Atoi(strings.TrimSpace(lowRaw))
-	if err != nil {
-		return MsgRange{}, fmt.Errorf("--range 下限 %q 不是数字", lowRaw)
-	}
-	high := 0
-	if strings.TrimSpace(highRaw) != "" {
-		high, err = strconv.Atoi(strings.TrimSpace(highRaw))
-		if err != nil {
-			return MsgRange{}, fmt.Errorf("--range 上限 %q 不是数字", highRaw)
-		}
-	}
-	return MsgRange{Mode: RangeBetween, Min: low, Max: high}, nil
 }
 
 // DateRange 是消息发送时间的过滤区间，两侧都是本地时区的秒级时间戳，0 表示该侧不限。
@@ -280,13 +264,25 @@ func messagePeerMatches(target tg.InputPeerClass, actual tg.PeerClass) bool {
 func eachMessageByHistory(ctx context.Context, api *tg.Client, peer tg.InputPeerClass, r MsgRange, since int, fn func(*tg.Message) error) error {
 	const pageSize = 100
 
+	if r.Mode == RangeMin && r.Min >= maxMessageID || r.Mode == RangeMax && r.Max <= 1 {
+		return nil
+	}
+	minID, maxID := r.Min, r.Max
+	if r.Mode == RangeBetween {
+		minID = max(0, r.Min-1)
+		if r.Max == maxMessageID {
+			maxID = 0
+		} else {
+			maxID = r.Max + 1
+		}
+	}
 	offsetID := 0
 	for page := 0; page < maxHistoryPages; page++ {
 		req := &tg.MessagesGetHistoryRequest{
 			Peer:     peer,
 			OffsetID: offsetID,
-			MinID:    r.Min,
-			MaxID:    r.Max,
+			MinID:    minID,
+			MaxID:    maxID,
 			Limit:    pageSize,
 		}
 		resp, err := api.MessagesGetHistory(ctx, req)
@@ -309,6 +305,9 @@ func eachMessageByHistory(ctx context.Context, api *tg.Client, peer tg.InputPeer
 				return nil
 			}
 			if msg, ok := m.(*tg.Message); ok {
+				if msg.ID <= minID || maxID > 0 && msg.ID >= maxID {
+					continue
+				}
 				if err := fn(msg); err != nil {
 					return err
 				}

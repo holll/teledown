@@ -27,8 +27,11 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gotd/td/constant"
@@ -118,7 +121,11 @@ var (
 // OpenSessionStore 打开（不存在则新建）会话库并建好表。
 func OpenSessionStore(path string) (*SessionStore, error) {
 	// busy_timeout：Python 版可能同时开着同一个库，遇到锁时等一会儿而不是立刻失败。
-	db, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(5000)")
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return nil, fmt.Errorf("解析会话库路径失败: %w", err)
+	}
+	db, err := sql.Open("sqlite", sessionDSN(abs))
 	if err != nil {
 		return nil, fmt.Errorf("打开会话库 %s 失败: %w", path, err)
 	}
@@ -132,6 +139,17 @@ func OpenSessionStore(path string) (*SessionStore, error) {
 		return nil, err
 	}
 	return s, nil
+}
+
+// sessionDSN requires an absolute path. Escape filename bytes (such as ? and #)
+// before appending SQLite parameters, and use an empty URI authority on Windows.
+func sessionDSN(abs string) string {
+	path := filepath.ToSlash(abs)
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	u := url.URL{Scheme: "file", Path: path, RawQuery: "_pragma=busy_timeout(5000)"}
+	return u.String()
 }
 
 // init 建表并补版本号。
@@ -160,7 +178,7 @@ func (s *SessionStore) Close() error {
 //
 // 没有授权（没有行、或 Telethon 写的空 BLOB，见其 _update_session_table）时返回
 // session.ErrNotFound，gotd 会按「未登录」处理并走登录流程。
-func (s *SessionStore) LoadSession(context.Context) ([]byte, error) {
+func (s *SessionStore) LoadSession(ctx context.Context) ([]byte, error) {
 	var (
 		dcID int
 		addr sql.NullString
@@ -169,7 +187,7 @@ func (s *SessionStore) LoadSession(context.Context) ([]byte, error) {
 	)
 	// 不写 SELECT *：老版 Telethon 的 sessions 是 5 列，新版多了 tmp_auth_key，
 	// 按列名取才能两种库都读。
-	err := s.db.QueryRow(
+	err := s.db.QueryRowContext(ctx,
 		`SELECT dc_id, server_address, port, auth_key FROM sessions LIMIT 1`,
 	).Scan(&dcID, &addr, &port, &key)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -202,7 +220,7 @@ func (s *SessionStore) LoadSession(context.Context) ([]byte, error) {
 // 与 Telethon 一样只保留一行（它每次都是 delete + insert）。gotd 传进来的是
 // session.Loader 序列化好的 JSON，这里解出 DC、地址与 auth key 存下；
 // Config 无处可放，丢弃即可——gotd 的 DC 列表与 config 都来自服务端，不依赖落盘的那份。
-func (s *SessionStore) StoreSession(_ context.Context, raw []byte) error {
+func (s *SessionStore) StoreSession(ctx context.Context, raw []byte) error {
 	var file gotdSessionFile
 	if err := json.Unmarshal(raw, &file); err != nil {
 		return fmt.Errorf("解析会话数据失败: %w", err)
@@ -216,16 +234,16 @@ func (s *SessionStore) StoreSession(_ context.Context, raw []byte) error {
 		host, port = dcAddress(data.DC, nil)
 	}
 
-	tx, err := s.db.Begin()
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("写入会话失败: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	if _, err := tx.Exec(`DELETE FROM sessions`); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM sessions`); err != nil {
 		return fmt.Errorf("写入会话失败: %w", err)
 	}
-	if _, err := tx.Exec(
+	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO sessions (dc_id, server_address, port, auth_key, takeout_id) VALUES (?, ?, ?, ?, NULL)`,
 		data.DC, host, port, data.AuthKey,
 	); err != nil {
@@ -241,12 +259,12 @@ func (s *SessionStore) StoreSession(_ context.Context, raw []byte) error {
 //
 // 只更新 hash 与 date，不碰 username / phone / name：这几个字段本工具没有，
 // 但可能是 Python 版写进去的，覆盖掉会丢信息。
-func (s *SessionStore) Save(_ context.Context, key peers.Key, value peers.Value) error {
+func (s *SessionStore) Save(ctx context.Context, key peers.Key, value peers.Value) error {
 	id, err := entityID(key)
 	if err != nil {
 		return err
 	}
-	_, err = s.db.Exec(
+	_, err = s.db.ExecContext(ctx,
 		`INSERT INTO entities (id, hash, date) VALUES (?, ?, ?)
 		 ON CONFLICT(id) DO UPDATE SET hash = excluded.hash, date = excluded.date`,
 		id, value.AccessHash, time.Now().Unix(),
@@ -258,14 +276,14 @@ func (s *SessionStore) Save(_ context.Context, key peers.Key, value peers.Value)
 }
 
 // Find 实现 peers.Storage。
-func (s *SessionStore) Find(_ context.Context, key peers.Key) (peers.Value, bool, error) {
+func (s *SessionStore) Find(ctx context.Context, key peers.Key) (peers.Value, bool, error) {
 	id, err := entityID(key)
 	if err != nil {
 		return peers.Value{}, false, err
 	}
 
 	var hash int64
-	err = s.db.QueryRow(`SELECT hash FROM entities WHERE id = ?`, id).Scan(&hash)
+	err = s.db.QueryRowContext(ctx, `SELECT hash FROM entities WHERE id = ?`, id).Scan(&hash)
 	if errors.Is(err, sql.ErrNoRows) {
 		return peers.Value{}, false, nil
 	}
@@ -279,24 +297,24 @@ func (s *SessionStore) Find(_ context.Context, key peers.Key) (peers.Value, bool
 //
 // 实体行由 Save 先写好，这里只补号码；MTProto 的手机号是纯数字，
 // 交给 SQLite 的 INTEGER 列自行转换（Telethon 也是这么存的）。
-func (s *SessionStore) SavePhone(_ context.Context, phone string, key peers.Key) error {
+func (s *SessionStore) SavePhone(ctx context.Context, phone string, key peers.Key) error {
 	id, err := entityID(key)
 	if err != nil {
 		return err
 	}
-	if _, err := s.db.Exec(`UPDATE entities SET phone = ? WHERE id = ?`, phone, id); err != nil {
+	if _, err := s.db.ExecContext(ctx, `UPDATE entities SET phone = ? WHERE id = ?`, phone, id); err != nil {
 		return fmt.Errorf("写入手机号失败: %w", err)
 	}
 	return nil
 }
 
 // FindPhone 实现 peers.Storage。手机号只会出现在用户实体上，但这里统一按标记 ID 解回来。
-func (s *SessionStore) FindPhone(_ context.Context, phone string) (peers.Key, peers.Value, bool, error) {
+func (s *SessionStore) FindPhone(ctx context.Context, phone string) (peers.Key, peers.Value, bool, error) {
 	var (
 		id   int64
 		hash int64
 	)
-	err := s.db.QueryRow(`SELECT id, hash FROM entities WHERE phone = ?`, phone).Scan(&id, &hash)
+	err := s.db.QueryRowContext(ctx, `SELECT id, hash FROM entities WHERE phone = ?`, phone).Scan(&id, &hash)
 	if errors.Is(err, sql.ErrNoRows) {
 		return peers.Key{}, peers.Value{}, false, nil
 	}
@@ -312,9 +330,9 @@ func (s *SessionStore) FindPhone(_ context.Context, phone string) (peers.Key, pe
 }
 
 // GetContactsHash 实现 peers.Storage。
-func (s *SessionStore) GetContactsHash(context.Context) (int64, error) {
+func (s *SessionStore) GetContactsHash(ctx context.Context) (int64, error) {
 	var value int64
-	err := s.db.QueryRow(`SELECT value FROM store_state WHERE key = ?`, contactsHashKey).Scan(&value)
+	err := s.db.QueryRowContext(ctx, `SELECT value FROM store_state WHERE key = ?`, contactsHashKey).Scan(&value)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, nil
 	}
@@ -325,8 +343,8 @@ func (s *SessionStore) GetContactsHash(context.Context) (int64, error) {
 }
 
 // SaveContactsHash 实现 peers.Storage。
-func (s *SessionStore) SaveContactsHash(_ context.Context, hash int64) error {
-	_, err := s.db.Exec(
+func (s *SessionStore) SaveContactsHash(ctx context.Context, hash int64) error {
+	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO store_state (key, value) VALUES (?, ?)
 		 ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
 		contactsHashKey, hash,

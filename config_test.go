@@ -1,7 +1,10 @@
 package main
 
 import (
+	"bufio"
 	"context"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -153,5 +156,67 @@ func TestSessionNameIsPythonMD5Prefix(t *testing.T) {
 		if want := c.pythonMD5[:16]; got != want {
 			t.Errorf("%s: SessionName() = %q，期望是 Python md5 的前 16 位 %q", c.name, got, want)
 		}
+	}
+}
+
+func TestLoadConfigValidatesAPIID(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".env")
+	for _, id := range []string{"-1", "0", "2147483648", "1.5"} {
+		if err := os.WriteFile(path, []byte("API_ID="+id+"\nAPI_HASH=hash\nPHONE=123\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := LoadConfig(path); err == nil {
+			t.Errorf("accepted API_ID %q", id)
+		}
+	}
+	if err := os.WriteFile(path, []byte("\ufeffexport\tAPI_ID=2147483647 # comment\r\nAPI_HASH=hash#literal\r\nPHONE=123\r\nPASSWORD=' p#ass ' # comment\r\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.APIID != 2147483647 || cfg.APIHash != "hash#literal" || cfg.Password != " p#ass " {
+		t.Fatal("BOM, comments, or quoted whitespace parsed incorrectly")
+	}
+}
+
+func TestSocks5DialerValidationDoesNotExposePassword(t *testing.T) {
+	for _, addr := range []string{
+		"socks5://u:password%invalid@host:1080", "http://u:password@host:1080",
+		"socks5://u:password@host:0", "socks5://u:password@host:99999",
+		"socks5://u:password@host:8080/path", "socks5://u:password@host#",
+		"socks5://2001:db8::1:1080",
+	} {
+		if _, err := socks5Dialer(addr); err == nil || strings.Contains(err.Error(), "password") {
+			t.Error("invalid SOCKS5 URL was accepted or its diagnostic contains credentials")
+		}
+	}
+	if _, err := socks5Dialer("socks5://[::1]:1080"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestReadSecretLinePreservesSignificantSpaceAndEOF(t *testing.T) {
+	for _, input := range []string{" p a s s ", " p a s s \r\n", " p a s s \n"} {
+		actual, err := readSecretLine(strings.NewReader(input))
+		if err != nil || actual != " p a s s " {
+			t.Errorf("readSecretLine(%q) = %q, %v", input, actual, err)
+		}
+	}
+	if _, err := readSecretLine(strings.NewReader("")); !errors.Is(err, io.EOF) {
+		t.Fatalf("empty input: %v", err)
+	}
+}
+
+func TestPipedCodeAndPasswordShareReader(t *testing.T) {
+	input := bufio.NewReader(strings.NewReader("1234\n  secret  "))
+	term := terminal.New(input, io.Discard)
+	code, err := term.Code(context.Background(), &tg.AuthSentCode{Type: &tg.AuthSentCodeTypeApp{Length: 4}})
+	if err != nil || code != "1234" {
+		t.Fatalf("Code = %q, %v", code, err)
+	}
+	if password, err := readSecretLine(input); err != nil || password != "  secret  " {
+		t.Fatalf("password = %q, %v", password, err)
 	}
 }

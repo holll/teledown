@@ -179,7 +179,7 @@ func TestDownloadOneRefreshesExpiredReference(t *testing.T) {
 	})
 	dir := t.TempDir()
 	target := filepath.Join(dir, "refresh.mp4")
-	info := &mediaInfo{Name: "refresh.mp4", Size: int64(len(data)), Location: &tg.InputDocumentFileLocation{ID: 1}}
+	info := &mediaInfo{Name: "refresh.mp4", FileID: 1, Size: int64(len(data)), Location: &tg.InputDocumentFileLocation{ID: 1}}
 	if err := downloadOne(context.Background(), client, &tg.InputPeerChannel{ChannelID: 7}, &tg.Message{ID: 5}, info, target, 1); err != nil {
 		t.Fatal(err)
 	}
@@ -270,5 +270,70 @@ func TestDownloadReportsFailuresAndContinues(t *testing.T) {
 				t.Errorf("单文件失败后没有继续：%v", visited)
 			}
 		})
+	}
+}
+
+func TestDownloadRejectsShortMediaAndDoesNotClobber(t *testing.T) {
+	for _, existing := range []bool{false, true} {
+		t.Run(fmt.Sprint(existing), func(t *testing.T) {
+			dir := t.TempDir()
+			target := filepath.Join(dir, "a.mp4")
+			size := int64(5)
+			if existing {
+				size = 1
+				if err := os.WriteFile(target, []byte("untouched"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			client := downloadTestClient(func(_ context.Context, in bin.Encoder, out bin.Decoder) error {
+				if _, ok := in.(*tg.UploadGetFileRequest); !ok {
+					return fmt.Errorf("unexpected %T", in)
+				}
+				out.(*tg.UploadFileBox).File = &tg.UploadFile{Type: &tg.StorageFileMp4{}, Bytes: []byte("a")}
+				return nil
+			})
+			info := &mediaInfo{Location: &tg.InputDocumentFileLocation{ID: 1}, Name: "a.mp4", Size: size}
+			if err := downloadOne(context.Background(), client, &tg.InputPeerSelf{}, &tg.Message{ID: 1}, info, target, 1); err == nil {
+				t.Fatal("expected rejection")
+			}
+			entries, err := os.ReadDir(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !existing && len(entries) != 0 {
+				t.Fatalf("partial remained: %v", entries)
+			}
+			if existing {
+				if b, err := os.ReadFile(target); err != nil || string(b) != "untouched" || len(entries) != 1 {
+					t.Fatalf("files=%v contents=%q err=%v", entries, b, err)
+				}
+			}
+		})
+	}
+}
+
+func TestDownloadRejectsLinkedDirectory(t *testing.T) {
+	dir := t.TempDir()
+	outer := t.TempDir()
+	if err := os.Symlink(outer, filepath.Join(dir, "channel")); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	if err := ensureDownloadDir(root, "channel"); err == nil {
+		t.Fatal("directory link accepted")
+	}
+}
+
+func TestMatchesSenderFailClosed(t *testing.T) {
+	if !matchesSender(nil, nil) || matchesSender(map[int64]struct{}{}, &tg.PeerUser{UserID: 7}) {
+		t.Fatal("empty and nil filters conflated")
+	}
+	filter := map[int64]struct{}{-1000000000007: {}}
+	if matchesSender(filter, nil) || matchesSender(filter, &tg.PeerUser{UserID: 7}) || !matchesSender(filter, &tg.PeerChannel{ChannelID: 7}) {
+		t.Fatal("sender identity was not fail-closed")
 	}
 }

@@ -106,6 +106,8 @@ func captureStdout(t *testing.T, fn func()) string {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer r.Close()
+	defer w.Close()
 	os.Stdout = w
 	defer func() { os.Stdout = orig }()
 
@@ -119,4 +121,14 @@ func captureStdout(t *testing.T, fn func()) string {
 		t.Fatal(err)
 	}
 	return string(out)
+}
+
+func TestFloodWaitMiddlewareDoesNotInvokeCanceledRequest(t *testing.T) {
+	next := &scriptedInvoker{}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	invoke := (floodWaitMiddleware{}).Handle(next)
+	if err := invoke(ctx, nil, nil); !errors.Is(err, context.Canceled) || next.calls != 0 {
+		t.Fatalf("err = %v, calls = %d; want canceled with no calls", err, next.calls)
+	}
 }

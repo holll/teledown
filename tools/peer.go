@@ -25,7 +25,7 @@ type Peer struct {
 	ID    int64
 }
 
-var numericIDRe = regexp.MustCompile(`^-?[1-9][0-9]{4,}$`)
+var numericIDRe = regexp.MustCompile(`^-?[0-9]+$`)
 
 // errPeerMissing 是内部哨兵：表示本地缓存与快路径都没解析出来，需要引导扫描。
 var errPeerMissing = errors.New("peer 不在本地缓存中")
@@ -51,6 +51,7 @@ func NewPeerManager(api *tg.Client, storage *SessionStore) *PeerManager {
 //   - @username / username：用户名或 t.me 链接
 //   - 数字 ID：-100XXXXXXXXXX（频道/超级群）、-XXXXXXXXXX（基础群）、正数（频道或用户）
 func (pm *PeerManager) Resolve(ctx context.Context, arg string) (*Peer, error) {
+	arg = strings.TrimSpace(arg)
 	if arg == "" {
 		return nil, fmt.Errorf("-id 不能为空")
 	}
@@ -115,7 +116,7 @@ func (pm *PeerManager) resolveByID(ctx context.Context, id int64, kind peerKind)
 	}
 
 	// 冷启动：扫一次会话列表，把实体灌进 peers.Storage 后重试
-	if err := pm.bootstrapPeers(ctx, id); err != nil {
+	if err := pm.bootstrapPeers(ctx, id, kind); err != nil {
 		return nil, err
 	}
 	switch kind {
@@ -194,30 +195,37 @@ func peerFromManager(p peers.Peer) *Peer {
 // 命中目标立即停止翻页；翻页游标不前进时立即终止（否则会重复请求同一页）。
 // Manager.Apply 会自动跳过 min 实体——它们没有可用的 access_hash，
 // 写进缓存反而会污染后续解析。
-func (pm *PeerManager) bootstrapPeers(ctx context.Context, wantID int64) error {
+func (pm *PeerManager) bootstrapPeers(ctx context.Context, wantID int64, kind peerKind) error {
 	const pageSize = 100
 	const maxPages = 200 // 安全上限
 
 	offset := tg.InputPeerClass(&tg.InputPeerEmpty{})
+	offsetID, offsetDate := 0, 0
 	for page := 0; page < maxPages; page++ {
 		resp, err := pm.mgr.API().MessagesGetDialogs(ctx, &tg.MessagesGetDialogsRequest{
-			OffsetPeer: offset,
-			Limit:      pageSize,
+			OffsetPeer:    offset,
+			OffsetID:      offsetID,
+			OffsetDate:    offsetDate,
+			ExcludePinned: page > 0,
+			Limit:         pageSize,
 		})
 		if err != nil {
 			return fmt.Errorf("读取会话列表失败: %w", err)
 		}
 
 		var (
-			dialogs []tg.DialogClass
-			chats   []tg.ChatClass
-			users   []tg.UserClass
+			dialogs  []tg.DialogClass
+			chats    []tg.ChatClass
+			users    []tg.UserClass
+			messages []tg.MessageClass
+			complete bool
 		)
 		switch v := resp.(type) {
 		case *tg.MessagesDialogs:
-			dialogs, chats, users = v.Dialogs, v.Chats, v.Users
+			complete = true
+			dialogs, chats, users, messages = v.Dialogs, v.Chats, v.Users, v.Messages
 		case *tg.MessagesDialogsSlice:
-			dialogs, chats, users = v.Dialogs, v.Chats, v.Users
+			dialogs, chats, users, messages = v.Dialogs, v.Chats, v.Users, v.Messages
 		case *tg.MessagesDialogsNotModified:
 			return nil
 		default:
@@ -227,45 +235,56 @@ func (pm *PeerManager) bootstrapPeers(ctx context.Context, wantID int64) error {
 		if err := pm.mgr.Apply(ctx, users, chats); err != nil {
 			return fmt.Errorf("写入 peer 缓存失败: %w", err)
 		}
-		if containsPeerID(chats, users, wantID) {
+		if containsPeerID(chats, users, wantID, kind) || complete || len(dialogs) == 0 {
 			return nil
 		}
-		if len(dialogs) < pageSize {
-			return nil // 已经翻到底
+		next, nextID, nextDate, ok := nextDialogOffset(dialogs, messages, chats, users)
+		if !ok || (samePeer(offset, next) && offsetID == nextID && offsetDate == nextDate) {
+			return fmt.Errorf("会话列表分页游标未推进 (offset_id=%d)", offsetID)
 		}
-
-		last, ok := dialogs[len(dialogs)-1].(*tg.Dialog)
-		if !ok || last.Peer == nil {
-			return nil
-		}
-		// 翻页游标需要用带 access_hash 的 InputPeer，从本次响应里的实体补全
-		next := toInputPeer(last.Peer, chats, users)
-		if samePeer(offset, next) {
-			return nil // 游标没前进，继续请求只会拿到同一页
-		}
-		offset = next
+		offset, offsetID, offsetDate = next, nextID, nextDate
 	}
-	return nil
+	return fmt.Errorf("会话列表分页超过上限 %d", maxPages)
 }
 
-// containsPeerID 判断本页实体里有没有目标 ID，用于命中后提前结束翻页。
-// 频道、基础群、用户三种都要看：-id 可能属于任意一种。
-func containsPeerID(chats []tg.ChatClass, users []tg.UserClass, wantID int64) bool {
-	for _, c := range chats {
-		switch ch := c.(type) {
+func nextDialogOffset(dialogs []tg.DialogClass, messages []tg.MessageClass, chats []tg.ChatClass, users []tg.UserClass) (tg.InputPeerClass, int, int, bool) {
+	for i := len(dialogs) - 1; i >= 0; i-- {
+		d, ok := dialogs[i].(*tg.Dialog)
+		if !ok || d.Peer == nil || d.TopMessage <= 0 {
+			continue
+		}
+		peer := toInputPeer(d.Peer, chats, users)
+		if _, empty := peer.(*tg.InputPeerEmpty); empty {
+			continue
+		}
+		for _, msg := range messages {
+			if m, ok := msg.AsNotEmpty(); ok && m.GetID() == d.TopMessage && m.GetDate() > 0 && messagePeerMatches(peer, m.GetPeerID()) {
+				return peer, m.GetID(), m.GetDate(), true
+			}
+		}
+	}
+	return nil, 0, 0, false
+}
+
+// Stop only when a matching non-min entity can be used by the resolver.
+func containsPeerID(chats []tg.ChatClass, users []tg.UserClass, wantID int64, kind peerKind) bool {
+	for _, entity := range chats {
+		switch ch := entity.(type) {
 		case *tg.Channel:
-			if ch.ID == wantID {
+			if kind != kindChat && ch.ID == wantID && !ch.Min {
 				return true
 			}
 		case *tg.Chat:
-			if ch.ID == wantID {
+			if kind != kindChannel && ch.ID == wantID {
 				return true
 			}
 		}
 	}
-	for _, u := range users {
-		if user, ok := u.(*tg.User); ok && user.ID == wantID {
-			return true
+	if kind == kindUnknown {
+		for _, entity := range users {
+			if user, ok := entity.(*tg.User); ok && user.ID == wantID && !user.Min {
+				return true
+			}
 		}
 	}
 	return false

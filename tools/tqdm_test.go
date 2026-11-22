@@ -19,25 +19,25 @@ import (
 func TestProgressBarConcurrentChunk(t *testing.T) {
 	const total = 1_000_000
 	bar := newProgressBar("x.bin", total)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	var wg sync.WaitGroup
-	for i := 0; i < 8; i++ {
-		wg.Add(1)
-		go func(base int64) {
-			defer wg.Done()
+	for i := range 8 {
+		wg.Go(func() {
 			for j := int64(1); j <= 200; j++ {
 				_ = bar.Chunk(ctx, uploader.ProgressState{
-					Uploaded: base + j*100,
+					Uploaded: int64(i)*100_000 + j*100,
 					Total:    total,
 				})
 			}
-		}(int64(i) * 100_000)
+		})
 	}
 	wg.Wait()
 
-	if got := bar.current.Load(); got < 0 || got > total {
-		t.Errorf("并发回调后进度 = %d，越界（应在 0..%d）", got, total)
+	const want = 720_000
+	_ = bar.Chunk(ctx, uploader.ProgressState{Uploaded: 100, Total: total})
+	if got := bar.current.Load(); got != want {
+		t.Errorf("并发回调后进度 = %d，期望 %d；迟到的回调不应使它倒退", got, want)
 	}
 }
 

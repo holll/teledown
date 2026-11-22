@@ -2,6 +2,8 @@ package tools
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"image"
 	"image/jpeg"
 	"os"
@@ -30,7 +32,7 @@ func TestExtractThumbnail(t *testing.T) {
 	video := filepath.Join(t.TempDir(), "test.mp4")
 	makeTestVideo(t, video)
 
-	data, err := ExtractThumbnail(video)
+	data, err := ExtractThumbnail(t.Context(), video)
 	if err != nil {
 		t.Fatalf("抽帧失败: %v", err)
 	}
@@ -66,7 +68,7 @@ func TestExtractThumbnailSmallVideoNotUpscaled(t *testing.T) {
 		t.Skipf("无法生成测试视频: %v: %s", err, out)
 	}
 
-	data, err := ExtractThumbnail(video)
+	data, err := ExtractThumbnail(t.Context(), video)
 	if err != nil {
 		t.Fatalf("抽帧失败: %v", err)
 	}
@@ -89,8 +91,16 @@ func TestExtractThumbnailOnNonVideo(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := ExtractThumbnail(path); err == nil {
+	if _, err := ExtractThumbnail(t.Context(), path); err == nil {
 		t.Error("对非视频文件抽帧应当报错，交由调用方降级处理")
+	}
+}
+
+func TestExtractThumbnailCanceled(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if _, err := ExtractThumbnail(ctx, "unused.mp4"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected cancellation, got %v", err)
 	}
 }
 

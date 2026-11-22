@@ -215,21 +215,21 @@ func TestContainsPeerID(t *testing.T) {
 		&tg.UserEmpty{ID: 555},
 	}
 
-	if containsPeerID(chats, users, 999) {
+	if containsPeerID(chats, users, 999, kindUnknown) {
 		t.Error("不存在的 ID 不应命中")
 	}
-	if !containsPeerID(append(chats, &tg.Channel{ID: want}), users, want) {
+	if !containsPeerID(append(chats, &tg.Channel{ID: want}), users, want, kindUnknown) {
 		t.Error("频道应命中")
 	}
-	if !containsPeerID(append(chats, &tg.Chat{ID: want}), users, want) {
+	if !containsPeerID(append(chats, &tg.Chat{ID: want}), users, want, kindUnknown) {
 		t.Error("基础群应命中（-id 也可能是普通群）")
 	}
-	if !containsPeerID(chats, append(users, &tg.User{ID: want}), want) {
+	if !containsPeerID(chats, append(users, &tg.User{ID: want}), want, kindUnknown) {
 		t.Error("用户应命中")
 	}
-	// 只有 min 频道时也算命中（是否需要更新由后续解析决定）
-	if !containsPeerID([]tg.ChatClass{&tg.Channel{ID: want, Min: true}}, nil, want) {
-		t.Error("min 频道也应算命中，避免重复翻页")
+	// min 实体不能提供可用凭据，不得停止扫描。
+	if containsPeerID([]tg.ChatClass{&tg.Channel{ID: want, Min: true}}, nil, want, kindUnknown) {
+		t.Error("min 频道不能算命中")
 	}
 }
 
@@ -273,4 +273,37 @@ func TestParsePeerID(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestBootstrapContinuesPastWrongPeerKindAndUsesFullOffset(t *testing.T) {
+	calls := 0
+	api := tg.NewClient(peerTestInvoker(func(_ context.Context, in bin.Encoder, out bin.Decoder) error {
+		req := in.(*tg.MessagesGetDialogsRequest)
+		box := out.(*tg.MessagesDialogsBox)
+		calls++
+		switch calls {
+		case 1:
+			if req.OffsetID != 0 || req.OffsetDate != 0 || req.ExcludePinned {
+				t.Fatalf("initial offset: %+v", req)
+			}
+			box.Dialogs = &tg.MessagesDialogsSlice{
+				Count:    2,
+				Dialogs:  []tg.DialogClass{&tg.Dialog{Peer: &tg.PeerUser{UserID: 7}, TopMessage: 12}},
+				Users:    []tg.UserClass{&tg.User{ID: 7, AccessHash: 99}},
+				Messages: []tg.MessageClass{&tg.Message{ID: 12, Date: 1700000000, PeerID: &tg.PeerUser{UserID: 7}}},
+			}
+		case 2:
+			want := &tg.InputPeerUser{UserID: 7, AccessHash: 99}
+			if !samePeer(req.OffsetPeer, want) || req.OffsetID != 12 || req.OffsetDate != 1700000000 || !req.ExcludePinned {
+				t.Fatalf("next offset: %+v", req)
+			}
+			box.Dialogs = &tg.MessagesDialogs{Chats: []tg.ChatClass{&tg.Channel{ID: 7, AccessHash: 123}}}
+		default:
+			t.Fatal("unexpected third page")
+		}
+		return nil
+	}))
+	if err := NewPeerManager(api, newTestStore(t)).bootstrapPeers(context.Background(), 7, kindChannel); err != nil || calls != 2 {
+		t.Fatalf("calls=%d err=%v", calls, err)
+	}
 }

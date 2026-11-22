@@ -60,25 +60,20 @@ func TestParseRange(t *testing.T) {
 		}
 	})
 
-	t.Run("区间两种写法等价", func(t *testing.T) {
-		a, err := ParseRange("10..200")
-		if err != nil {
-			t.Fatal(err)
-		}
-		b, err := ParseRange("s10s200")
-		if err != nil {
-			t.Fatal(err)
-		}
-		if a.Mode != b.Mode || a.Min != b.Min || a.Max != b.Max {
-			t.Errorf("10..200 与 s10s200 应等价: %+v vs %+v", a, b)
-		}
-		if a.Mode != RangeBetween || a.Min != 10 || a.Max != 200 {
-			t.Errorf("区间解析为 %+v", a)
+	t.Run("闭区间", func(t *testing.T) {
+		for _, input := range []struct {
+			raw      string
+			min, max int
+		}{{"10..200", 10, 200}, {"10..10", 10, 10}, {"1..2147483647", 1, maxMessageID}} {
+			r, err := ParseRange(input.raw)
+			if err != nil || r.Mode != RangeBetween || r.Min != input.min || r.Max != input.max {
+				t.Errorf("%q = %+v, %v", input.raw, r, err)
+			}
 		}
 	})
 
 	t.Run("非法输入返回错误", func(t *testing.T) {
-		for _, in := range []string{">abc", "sX", "1,abc", "s10", "abc"} {
+		for _, in := range []string{">abc", "sX", "1,abc", "s10", "abc", "s10s200", "s10..200", "1..", "2..1", "0", "<0", "1,-2", "1,", "2147483648", "+1", "0..0"} {
 			if _, err := ParseRange(in); err == nil {
 				t.Errorf("ParseRange(%q) 应报错", in)
 			}

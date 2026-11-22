@@ -47,6 +47,9 @@ func main() {
 		os.Exit(2)
 	}
 
+	if errors.Is(err, flag.ErrHelp) {
+		return
+	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "错误: %v\n", err)
 		os.Exit(1)
@@ -73,7 +76,7 @@ download / upload 额外参数:
   <100        消息 ID 小于 100
   100         单条消息
   1,2,3       多条消息
-  10..200     区间（等价 s10s200）
+  10..200     闭区间，包含两个端点
 
 --since / --until 支持的写法（按消息发送时间过滤，本地时区）:
   2026-09-01        按天，含当天整天（--since 从 00:00:00，--until 到 23:59:59）
@@ -88,11 +91,23 @@ func commonFlags(fs *flag.FlagSet) (config *string, proxy *string) {
 	return
 }
 
+// parseCommandFlags rejects positional arguments instead of silently ignoring them
+// and any flags following them.
+func parseCommandFlags(fs *flag.FlagSet, args []string) error {
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("不支持位置参数: %q", fs.Arg(0))
+	}
+	return nil
+}
+
 // runInfoCommand 只做登录与账号信息展示，供确认登录是否成功。
 func runInfoCommand(args []string) error {
-	fs := flag.NewFlagSet("info", flag.ExitOnError)
+	fs := flag.NewFlagSet("info", flag.ContinueOnError)
 	config, proxyAddr := commonFlags(fs)
-	if err := fs.Parse(args); err != nil {
+	if err := parseCommandFlags(fs, args); err != nil {
 		return err
 	}
 
@@ -141,7 +156,7 @@ func yesNo(b bool) string {
 }
 
 func runDownloadCommand(args []string) error {
-	fs := flag.NewFlagSet("download", flag.ExitOnError)
+	fs := flag.NewFlagSet("download", flag.ContinueOnError)
 	config, proxyAddr := commonFlags(fs)
 	threads := fs.Int("threads", tools.DefaultThreads, "分片并发数")
 	channelID := fs.String("id", "", "频道 ID 或 @用户名")
@@ -149,11 +164,14 @@ func runDownloadCommand(args []string) error {
 	prefix := fs.String("prefix", "", "文件名通配符，; 分隔多条")
 	since := fs.String("since", "", "只下载该日期（含）之后的消息，如 2026-09-01")
 	until := fs.String("until", "", "只下载该日期（含）之前的消息")
-	if err := fs.Parse(args); err != nil {
+	if err := parseCommandFlags(fs, args); err != nil {
 		return err
 	}
-	if *channelID == "" {
+	if *channelID = strings.TrimSpace(*channelID); *channelID == "" {
 		return fmt.Errorf("必须指定 -id")
+	}
+	if *threads <= 0 {
+		return fmt.Errorf("-threads 必须大于 0")
 	}
 
 	msgRange, err := tools.ParseRange(*rangeArg)
@@ -184,23 +202,33 @@ func runDownloadCommand(args []string) error {
 }
 
 func runUploadCommand(args []string) error {
-	fs := flag.NewFlagSet("upload", flag.ExitOnError)
+	fs := flag.NewFlagSet("upload", flag.ContinueOnError)
 	config, proxyAddr := commonFlags(fs)
 	threads := fs.Int("threads", tools.DefaultThreads, "分片并发数")
 	channelID := fs.String("id", "", "频道 ID、@用户名或 me")
 	path := fs.String("path", "", "要上传的文件或目录")
 	deleteAfter := fs.String("dau", "N", "上传后是否删除源文件 (Y/N)")
 	tag := fs.String("at", "", "追加到描述前的标签，不带 #")
-	if err := fs.Parse(args); err != nil {
+	if err := parseCommandFlags(fs, args); err != nil {
 		return err
 	}
 	if *path == "" {
 		return fmt.Errorf("必须指定 -path")
 	}
-	if *channelID == "" {
+	if *channelID = strings.TrimSpace(*channelID); *channelID == "" {
 		*channelID = "me"
 	}
-	deleteFlag := *deleteAfter == "Y" || *deleteAfter == "y"
+	if *threads <= 0 {
+		return fmt.Errorf("-threads 必须大于 0")
+	}
+	var deleteFlag bool
+	switch strings.ToUpper(strings.TrimSpace(*deleteAfter)) {
+	case "Y":
+		deleteFlag = true
+	case "N":
+	default:
+		return fmt.Errorf("-dau 只能为 Y 或 N")
+	}
 
 	return withClient(*config, *proxyAddr, 0, func(ctx context.Context, client *telegram.Client, cfg *Config, store *tools.SessionStore) error {
 		peer, err := tools.NewPeerManager(client.API(), store).Resolve(ctx, *channelID)
@@ -251,6 +279,9 @@ func withClient(
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	// If an interactive stdin read has not returned yet, a subsequent signal
+	// must still be able to terminate the command.
+	defer context.AfterFunc(ctx, stop)()
 	if timeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, timeout)
@@ -263,8 +294,8 @@ func withClient(
 		}
 		return fn(ctx, client, cfg, store)
 	})
-	if errors.Is(err, context.DeadlineExceeded) {
-		return fmt.Errorf("操作超时（%s），请检查网络与代理是否可用", timeout)
+	if timeout > 0 && errors.Is(ctx.Err(), context.DeadlineExceeded) && errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Errorf("操作超时（%s），请检查网络与代理是否可用: %w", timeout, err)
 	}
 	return err
 }

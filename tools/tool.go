@@ -5,6 +5,7 @@ package tools
 import (
 	"crypto/md5"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -58,6 +59,32 @@ func sanitizeFilename(s string) string {
 		}
 		return r
 	}, s)
+}
+
+// safeDownloadComponent ensures a portable, nonempty single path component.
+func safeDownloadComponent(name string) string {
+	name = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) || strings.ContainsRune(illegalChars, r) {
+			return '_'
+		}
+		return r
+	}, name)
+	name = strings.TrimRight(name, " .")
+	if name == "" {
+		return "_"
+	}
+	base, _, _ := strings.Cut(name, ".")
+	base = strings.ToUpper(strings.TrimRight(base, " "))
+	switch base {
+	case "CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$":
+		return "_" + name
+	}
+	if prefix := len(base) >= 3 && (base[:3] == "COM" || base[:3] == "LPT"); prefix {
+		if suffix := base[3:]; utf8.RuneCountInString(suffix) == 1 && strings.Contains("123456789¹²³", suffix) {
+			return "_" + name
+		}
+	}
+	return name
 }
 
 // shorten 中间省略的超长文件名，与 Python 版 shorten_filename 一致。
@@ -231,12 +258,12 @@ func shortenFilename(s string, limit int) string {
 // 原始文件名 > 消息文本（截断后）> 文件 ID，再接扩展名。
 func BuildFilename(originalName, messageText string, fileID int64, mime string) string {
 	if originalName != "" {
-		return sanitizeFilename(originalName)
+		return safeDownloadComponent(sanitizeFilename(originalName))
 	}
 
 	ext := ExtensionForMIME(mime)
 	if messageText != "" {
-		return shortenFilename(messageText, shortenLimit) + ext
+		return safeDownloadComponent(shortenFilename(messageText, shortenLimit) + ext)
 	}
 	return fmt.Sprintf("%d%s", fileID, ext)
 }
@@ -252,17 +279,24 @@ func MonthDir(unix int) string {
 // ResolveSavePath 处理重名文件：
 // 同名且大小相同视为已下载（返回 true）；否则依次尝试 name(2).ext、name(3).ext。
 func ResolveSavePath(path string, size int64) (exists bool, target string) {
+	exists, target, _ = resolveSavePath(os.Lstat, path, size)
+	return exists, target
+}
+
+func resolveSavePath(lstat func(string) (os.FileInfo, error), path string, size int64) (bool, string, error) {
 	ext := filepath.Ext(path)
 	base := strings.TrimSuffix(path, ext)
-
-	target = path
+	target := path
 	for i := 2; ; i++ {
-		info, err := os.Stat(target)
-		if err != nil {
-			return false, target
+		info, err := lstat(target)
+		if errors.Is(err, os.ErrNotExist) {
+			return false, target, nil
 		}
-		if size > 0 && info.Size() == size {
-			return true, target
+		if err != nil {
+			return false, "", err
+		}
+		if size > 0 && info.Mode().IsRegular() && info.Size() == size {
+			return true, target, nil
 		}
 		target = fmt.Sprintf("%s(%d)%s", base, i, ext)
 	}

@@ -223,3 +223,11 @@ func TestMonthDir(t *testing.T) {
 		}
 	}
 }
+
+func TestSafeDownloadFilename(t *testing.T) {
+	for in, want := range map[string]string{"..": "_", "a/b:c.txt": "a_b_c.txt", "NUL.mp4": "_NUL.mp4", "COM¹.txt": "_COM¹.txt", "file. ": "file"} {
+		if got := BuildFilename(in, "", 1, "video/mp4"); got != want {
+			t.Errorf("%q = %q want %q", in, got, want)
+		}
+	}
+}

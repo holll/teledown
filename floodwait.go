@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"sync/atomic"
 	"time"
 
 	"github.com/gotd/contrib/middleware/floodwait"
@@ -55,26 +54,32 @@ func (floodWaitMiddleware) Handle(next tg.Invoker) telegram.InvokeFunc {
 // SimpleWaiter 会继续当成限流错误接着重试，中文提示就永远到不了用户手上。
 type floodLogInvoker struct {
 	next     tg.Invoker
-	attempts atomic.Int32
+	attempts int
 }
 
 func (i *floodLogInvoker) Invoke(ctx context.Context, input bin.Encoder, output bin.Decoder) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	err := i.next.Invoke(ctx, input, output)
 	if err == nil {
 		return nil
 	}
 
-	wait, isFlood := tgerr.AsFloodWait(err)
-	if !isFlood {
+	rpc, ok := tgerr.As(err)
+	if !ok || rpc.Code != 420 || !rpc.IsOneOf(tgerr.FloodWaitErrors...) {
 		return err
 	}
-	if wait > floodSleepThreshold {
-		return fmt.Errorf("触发限流，需等待 %s（超过 %s 的自动等待上限），请稍后再试：%v",
-			wait.Round(time.Second), floodSleepThreshold, err)
+	// Check seconds before converting to a nanosecond duration to avoid overflow.
+	if rpc.Argument > int(floodSleepThreshold/time.Second) {
+		return fmt.Errorf("触发限流，需等待 %d 秒（超过 %s 的自动等待上限），请稍后再试：%v",
+			rpc.Argument, floodSleepThreshold, err)
 	}
+	wait := time.Duration(max(1, rpc.Argument)) * time.Second
 
-	attempt := i.attempts.Add(1)
-	if int(attempt) > floodMaxRetries {
+	i.attempts++
+	attempt := i.attempts
+	if attempt > floodMaxRetries {
 		return fmt.Errorf("连续 %d 次被限流（每次都已等满服务端要求），仍未能通过，请稍后再试：%v",
 			floodMaxRetries, err)
 	}
