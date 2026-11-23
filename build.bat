@@ -17,7 +17,7 @@ REM    nopause     do not pause at the end (for script / CI use)
 REM    --no-vet    skip the go vet pre-check
 REM    --no-upx    skip UPX compression
 REM    --targets   comma separated platform list, e.g. linux/arm64,darwin/arm64
-REM                (default: windows/amd64 linux/amd64)
+REM                (default: windows/amd64 linux/amd64 linux/arm64 linux/armv7)
 REM
 REM  CGO_ENABLED=0 is forced below: the session store uses a pure Go SQLite
 REM  driver (modernc.org/sqlite), so cross compiling needs no C toolchain.
@@ -36,7 +36,7 @@ set "DO_PAUSE=1"
 set "DO_VET=1"
 set "DO_UPX=1"
 set "DO_HELP=0"
-set "TARGETS=windows/amd64 linux/amd64"
+set "TARGETS=windows/amd64 linux/amd64 linux/arm64 linux/armv7"
 set "TARGETS_SET=0"
 set "EXPECT_TARGETS=0"
 
@@ -248,7 +248,7 @@ echo   --no-upx    skip UPX compression
 echo   --targets   custom platforms, e.g. --targets=linux/arm64,darwin/arm64
 echo.
 echo output: dist\teledown-go-{os}-{arch}[.exe]
-echo default targets: windows/amd64 linux/amd64
+echo default targets: windows/amd64 linux/amd64 linux/arm64 linux/armv7
 set "RC=0"
 goto finish
 

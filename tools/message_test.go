@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"slices"
 	"testing"
 
 	"github.com/gotd/td/bin"
@@ -37,6 +38,7 @@ func TestEachMessageHistoryPagination(t *testing.T) {
 					}
 				}
 				want = append(want, 100, 10)
+				slices.Reverse(want)
 				calls := 0
 				api := tg.NewClient(messageInvoker(func(_ context.Context, in bin.Encoder, out bin.Decoder) error {
 					req, ok := in.(*tg.MessagesGetHistoryRequest)
@@ -112,8 +114,44 @@ func TestEachMessageHistorySince(t *testing.T) {
 				got = append(got, m.ID)
 				return nil
 			})
-			if err != nil || calls != 1 || !reflect.DeepEqual(got, []int{10, 7}) {
+			if err != nil || calls != 1 || !reflect.DeepEqual(got, []int{7, 10}) {
 				t.Fatalf("err=%v calls=%d got=%v", err, calls, got)
+			}
+		})
+	}
+}
+
+func TestEachMessageOpenRangesAscending(t *testing.T) {
+	for _, tc := range []struct {
+		raw  string
+		want []int
+	}{
+		{"", []int{79, 80, 81, 82}},
+		{">80", []int{81, 82}},
+		{"<81", []int{79, 80}},
+	} {
+		t.Run(tc.raw, func(t *testing.T) {
+			r, err := ParseRange(tc.raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			api := tg.NewClient(messageInvoker(func(_ context.Context, in bin.Encoder, out bin.Decoder) error {
+				req := in.(*tg.MessagesGetHistoryRequest)
+				if req.MinID != r.Min || req.MaxID != r.Max {
+					t.Fatalf("请求边界错误：min=%d max=%d", req.MinID, req.MaxID)
+				}
+				out.(*tg.MessagesMessagesBox).Messages = &tg.MessagesMessages{Messages: []tg.MessageClass{
+					&tg.Message{ID: 82}, &tg.Message{ID: 81}, &tg.Message{ID: 80}, &tg.Message{ID: 79},
+				}}
+				return nil
+			}))
+			var got []int
+			err = EachMessage(t.Context(), api, &tg.InputPeerChat{ChatID: 7}, r, 0, func(m *tg.Message) error {
+				got = append(got, m.ID)
+				return nil
+			})
+			if err != nil || !slices.Equal(got, tc.want) {
+				t.Fatalf("消息 ID=%v，预期=%v，错误=%v", got, tc.want, err)
 			}
 		})
 	}
@@ -162,7 +200,7 @@ func TestEachMessageByIDPeer(t *testing.T) {
 				selfCalls, messageCalls := 0, 0
 				ids := []int{11}
 				if mode == RangeList {
-					ids = []int{11, 12, 13, 14, 15, 16, 17, 18, 19, 20}
+					ids = []int{20, 11, 18, 12, 17, 13, 16, 14, 15, 19}
 				}
 				api := tg.NewClient(messageInvoker(func(_ context.Context, in bin.Encoder, out bin.Decoder) error {
 					switch req := in.(type) {
@@ -199,6 +237,7 @@ func TestEachMessageByIDPeer(t *testing.T) {
 						rows = append(rows, &tg.Message{ID: 13 + i, PeerID: p})
 					}
 					rows = append(rows, &tg.Message{ID: 20, PeerID: tc.match})
+					slices.Reverse(rows)
 					if mode == RangeSingle {
 						// 单个请求的 ID 也可能属于其他会话。
 						rows = []tg.MessageClass{&tg.Message{ID: 11, PeerID: &tg.PeerUser{UserID: 8}}}

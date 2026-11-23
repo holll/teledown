@@ -52,7 +52,7 @@ func NewTelegramClient(cfg *Config, proxyOverride string, store *tools.SessionSt
 		// 因此 bot_token 登录时显式关闭，继续走主 DC。
 		AllowCDN: cfg.BotToken == "",
 		// 自动消化 FLOOD_WAIT：gotd 默认不处理，会把 420 错误直接抛出。
-		Middlewares: []telegram.Middleware{floodWaitMiddleware{}},
+		Middlewares: []telegram.Middleware{&floodWaitMiddleware{}},
 	}
 
 	proxyURL := proxyOverride

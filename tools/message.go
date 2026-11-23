@@ -3,8 +3,10 @@ package tools
 // 本文件对应 Python 版 tools/tool.py 的 get_history_message：--range 解析与消息遍历。
 
 import (
+	"cmp"
 	"context"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -186,19 +188,32 @@ func ParseDateRange(sinceRaw, untilRaw string) (DateRange, error) {
 	return out, nil
 }
 
-// EachMessage 按范围遍历消息，逐条回调。
-// 回调返回错误时立即中断；大小未知的频道不会一次性把消息全部读进内存。
+// EachMessage 按消息 ID 升序逐条回调，回调返回错误时立即中断。
 //
-// since 为消息时间的下界（秒级时间戳，0 表示不限）：历史遍历按时间递减，
-// 越过下界后可以立即收工，不必为「只看最近几个月」再翻完整个频道。
+// since 为消息时间的下界（秒级时间戳，0 表示不限）。历史接口从新到旧返回，
+// 越过下界时停止拉取，再将已收集的消息反向处理，以保证跨页升序。
 func EachMessage(ctx context.Context, api *tg.Client, peer tg.InputPeerClass, r MsgRange, since int, fn func(*tg.Message) error) error {
-	switch r.Mode {
-	case RangeSingle, RangeList:
-		// 按 ID 拉取的顺序由传入的 ID 决定，不能据此提前结束，日期过滤由回调负责
+	if r.Mode == RangeSingle || r.Mode == RangeList {
+		// 按 ID 拉取不能据日期提前结束，日期过滤由回调负责。
 		return eachMessageByID(ctx, api, peer, r.IDs, fn)
-	default:
-		return eachMessageByHistory(ctx, api, peer, r, since, fn)
 	}
+
+	var messages []*tg.Message
+	if err := eachMessageByHistory(ctx, api, peer, r, since, func(msg *tg.Message) error {
+		messages = append(messages, msg)
+		return nil
+	}); err != nil {
+		return err
+	}
+	for _, msg := range slices.Backward(messages) {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := fn(msg); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // eachMessageByID 按消息 ID 拉取单条或多条。
@@ -229,6 +244,7 @@ func eachMessageByID(ctx context.Context, api *tg.Client, peer tg.InputPeerClass
 	if err != nil {
 		return fmt.Errorf("按 ID 拉取消息失败: %w", err)
 	}
+	slices.SortFunc(raw, func(a, b tg.MessageClass) int { return cmp.Compare(a.GetID(), b.GetID()) })
 	for _, m := range raw {
 		msg, ok := m.(*tg.Message)
 		if !ok {

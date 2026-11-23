@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"fmt"
+	"reflect"
+	"sync"
 	"time"
 
 	"github.com/gotd/contrib/middleware/floodwait"
@@ -28,11 +30,14 @@ const floodMaxRetries = 3
 //
 // 本文件只保留策略与中文提示：等待上限、重试次数、以及给用户看的进度信息——
 // SimpleWaiter 本身是无输出的 invoker，且上限/次数超限时只给英文错误。
-type floodWaitMiddleware struct{}
+type floodWaitMiddleware struct {
+	mu       sync.Mutex
+	cooldown map[reflect.Type]time.Time
+}
 
-var _ telegram.Middleware = floodWaitMiddleware{}
+var _ telegram.Middleware = (*floodWaitMiddleware)(nil)
 
-func (floodWaitMiddleware) Handle(next tg.Invoker) telegram.InvokeFunc {
+func (m *floodWaitMiddleware) Handle(next tg.Invoker) telegram.InvokeFunc {
 	// 上限与次数在下面按谓词再设一遍，作为兜底：常见路径由 floodLogInvoker 用中文拦下，
 	// 万一出现它不认识的限流错误，SimpleWaiter 也不会无休止地睡下去（最长 14 天）。
 	waiter := floodwait.NewSimpleWaiter().
@@ -41,7 +46,49 @@ func (floodWaitMiddleware) Handle(next tg.Invoker) telegram.InvokeFunc {
 
 	return func(ctx context.Context, input bin.Encoder, output bin.Decoder) error {
 		// 每次请求一个独立的 invoker，重试计数才不会跨请求累加
-		return waiter.Handle(&floodLogInvoker{next: next})(ctx, input, output)
+		return waiter.Handle(&floodLogInvoker{next: next, middleware: m})(ctx, input, output)
+	}
+}
+
+func (m *floodWaitMiddleware) waitForCooldown(ctx context.Context, kind reflect.Type) error {
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		m.mu.Lock()
+		remaining := time.Until(m.cooldown[kind])
+		if remaining <= 0 {
+			delete(m.cooldown, kind)
+		}
+		m.mu.Unlock()
+
+		if remaining <= 0 {
+			return nil
+		}
+		if remaining > floodSleepThreshold {
+			return fmt.Errorf("同类请求仍在限流，需等待 %s（超过 %s 的自动等待上限），请稍后再试",
+				remaining.Round(time.Second), floodSleepThreshold)
+		}
+		timer := time.NewTimer(remaining)
+		select {
+		case <-timer.C:
+			// 等待期间其他在途请求可能延长了冷却时间，发出请求前再检查。
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		}
+	}
+}
+
+func (m *floodWaitMiddleware) recordCooldown(kind reflect.Type, wait time.Duration) {
+	until := time.Now().Add(wait)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.cooldown == nil {
+		m.cooldown = make(map[reflect.Type]time.Time)
+	}
+	if until.After(m.cooldown[kind]) {
+		m.cooldown[kind] = until
 	}
 }
 
@@ -53,12 +100,14 @@ func (floodWaitMiddleware) Handle(next tg.Invoker) telegram.InvokeFunc {
 // 注意这里用 %v 而不是 %w 带上原始错误：一旦用 %w 保留 tgerr 类型，
 // SimpleWaiter 会继续当成限流错误接着重试，中文提示就永远到不了用户手上。
 type floodLogInvoker struct {
-	next     tg.Invoker
-	attempts int
+	next       tg.Invoker
+	middleware *floodWaitMiddleware
+	attempts   int
 }
 
 func (i *floodLogInvoker) Invoke(ctx context.Context, input bin.Encoder, output bin.Decoder) error {
-	if err := ctx.Err(); err != nil {
+	kind := reflect.TypeOf(input)
+	if err := i.middleware.waitForCooldown(ctx, kind); err != nil {
 		return err
 	}
 	err := i.next.Invoke(ctx, input, output)
@@ -70,7 +119,11 @@ func (i *floodLogInvoker) Invoke(ctx context.Context, input bin.Encoder, output 
 	if !ok || rpc.Code != 420 || !rpc.IsOneOf(tgerr.FloodWaitErrors...) {
 		return err
 	}
-	// Check seconds before converting to a nanosecond duration to avoid overflow.
+	if kind != nil {
+		const maxSeconds = int64(1<<63-1) / int64(time.Second)
+		i.middleware.recordCooldown(kind, time.Duration(min(max(1, int64(rpc.Argument)), maxSeconds))*time.Second)
+	}
+	// 先比较秒数，避免转换成纳秒时溢出。
 	if rpc.Argument > int(floodSleepThreshold/time.Second) {
 		return fmt.Errorf("触发限流，需等待 %d 秒（超过 %s 的自动等待上限），请稍后再试：%v",
 			rpc.Argument, floodSleepThreshold, err)

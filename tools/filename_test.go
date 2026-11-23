@@ -6,7 +6,6 @@ import (
 	"runtime"
 	"strings"
 	"testing"
-	"time"
 )
 
 func TestSanitizeTitleAndFilename(t *testing.T) {
@@ -202,24 +201,6 @@ func TestExtensionForMIMEExpandedTable(t *testing.T) {
 	} {
 		if got := ExtensionForMIME(mimeType); got == ".bin" {
 			t.Errorf("ExtensionForMIME(%q) 不应退化成 .bin", mimeType)
-		}
-	}
-}
-
-func TestMonthDir(t *testing.T) {
-	// 用本地时区构造时间戳，避免测试机时区影响跨月边界
-	cases := []struct {
-		t    time.Time
-		want string
-	}{
-		{time.Date(2026, 8, 15, 12, 0, 0, 0, time.Local), "2026-08"},
-		{time.Date(2026, 1, 1, 0, 0, 0, 0, time.Local), "2026-01"},
-		{time.Date(2025, 12, 31, 23, 59, 59, 0, time.Local), "2025-12"},
-		{time.Date(2000, 3, 5, 8, 30, 0, 0, time.Local), "2000-03"},
-	}
-	for _, c := range cases {
-		if got := MonthDir(int(c.t.Unix())); got != c.want {
-			t.Errorf("MonthDir(%v) = %q，期望 %q", c.t, got, c.want)
 		}
 	}
 }

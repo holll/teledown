@@ -21,6 +21,8 @@ import (
 // 不加时限会让「快速自检」变成无限等待。
 const infoTimeout = 60 * time.Second
 
+var errInterrupted = errors.New("收到退出信号，操作已中止。")
+
 func main() {
 	if len(os.Args) < 2 {
 		usage()
@@ -50,6 +52,10 @@ func main() {
 	if errors.Is(err, flag.ErrHelp) {
 		return
 	}
+	if errors.Is(err, errInterrupted) {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(130)
+	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "错误: %v\n", err)
 		os.Exit(1)
@@ -71,7 +77,7 @@ func usage() {
 download / upload 额外参数:
   -threads <n>  分片并发数，默认 4
 
---range 支持的写法:
+--range 支持的写法（按消息 ID 从小到大下载）:
   >100        消息 ID 大于 100
   <100        消息 ID 小于 100
   100         单条消息
@@ -277,11 +283,12 @@ func withClient(
 		return err
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	signalCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	// If an interactive stdin read has not returned yet, a subsequent signal
 	// must still be able to terminate the command.
-	defer context.AfterFunc(ctx, stop)()
+	defer context.AfterFunc(signalCtx, stop)()
+	ctx := signalCtx
 	if timeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, timeout)
@@ -294,6 +301,10 @@ func withClient(
 		}
 		return fn(ctx, client, cfg, store)
 	})
+	// gotd 可能把 context.Canceled 当成正常退出并返回 nil。
+	if signalCtx.Err() != nil && (err == nil || errors.Is(err, context.Canceled)) {
+		return errInterrupted
+	}
 	if timeout > 0 && errors.Is(ctx.Err(), context.DeadlineExceeded) && errors.Is(err, context.DeadlineExceeded) {
 		return fmt.Errorf("操作超时（%s），请检查网络与代理是否可用: %w", timeout, err)
 	}

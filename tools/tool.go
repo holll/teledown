@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-	"time"
 	"unicode"
 	"unicode/utf8"
 )
@@ -102,42 +101,6 @@ func shorten(name string, limit int) string {
 
 // stripEmoji 去掉表情符号。
 func stripEmoji(s string) string { return replaceEmoji(s, "") }
-
-// replaceEmoji 把表情符号替换成指定文本。
-// 这里只覆盖常见区段，与 demoji 的全量表相比是近似实现。
-func replaceEmoji(s, repl string) string {
-	var b strings.Builder
-	for _, r := range s {
-		if isEmoji(r) {
-			b.WriteString(repl)
-			continue
-		}
-		b.WriteRune(r)
-	}
-	return b.String()
-}
-
-func isEmoji(r rune) bool {
-	switch {
-	case r >= 0x1F300 && r <= 0x1FAFF: // 各类表情、符号、补充符号
-		return true
-	case r >= 0x1F000 && r <= 0x1F2FF: // 麻将、扑克、区域符号等
-		return true
-	case r >= 0x2600 && r <= 0x27BF: // 杂项符号与装饰符号
-		return true
-	case r >= 0x2B00 && r <= 0x2BFF: // 杂项符号与箭头
-		return true
-	case r >= 0xFE00 && r <= 0xFE0F: // 变体选择符
-		return true
-	case r == 0x200D: // 零宽连接符
-		return true
-	case r >= 0x1F1E6 && r <= 0x1F1FF: // 区域指示符（国旗）
-		return true
-	case r >= 0x2190 && r <= 0x21FF: // 箭头（Telegram 中常用作装饰）
-		return false
-	}
-	return unicode.Is(unicode.So, r) && r >= 0x2000
-}
 
 // mimeExtensions 常见 MIME 到扩展名的映射。
 //
@@ -266,14 +229,6 @@ func BuildFilename(originalName, messageText string, fileID int64, mime string) 
 		return safeDownloadComponent(shortenFilename(messageText, shortenLimit) + ext)
 	}
 	return fmt.Sprintf("%d%s", fileID, ext)
-}
-
-// MonthDir 由消息时间戳生成按月分层的目录名（形如 "2026-08"）。
-//
-// 下载时用它把媒体归档到「频道/年-月」子目录。Telegram 的 Date 是 UTC 秒级
-// 时间戳，这里转成本地时区再取年月，归档月份才符合使用者所在时区的直觉。
-func MonthDir(unix int) string {
-	return time.Unix(int64(unix), 0).Format("2006-01")
 }
 
 // ResolveSavePath 处理重名文件：

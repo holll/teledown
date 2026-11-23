@@ -80,14 +80,14 @@ func Download(ctx context.Context, client *telegram.Client, peer *Peer, opt Down
 			return nil
 		}
 		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 			// 单文件失败不影响其余文件，与 Python 版行为一致
 			fmt.Printf("下载出错 %s: %v\n", name, err)
 			failed++
 			if firstErr == nil {
 				firstErr = err
-			}
-			if ctx.Err() != nil {
-				return ctx.Err()
 			}
 			return nil
 		}
@@ -148,11 +148,7 @@ func saveMedia(ctx context.Context, client *telegram.Client, root *os.Root, chan
 	if err := ensureDownloadDir(root, channel); err != nil {
 		return false, err
 	}
-	month := filepath.Join(channel, MonthDir(msg.Date))
-	if err := ensureDownloadDir(root, month); err != nil {
-		return false, err
-	}
-	exists, target, err := resolveSavePath(root.Lstat, filepath.Join(month, name), info.Size)
+	exists, target, err := resolveSavePath(root.Lstat, filepath.Join(channel, name), info.Size)
 	if err != nil {
 		return false, err
 	}
@@ -195,7 +191,7 @@ func downloadOneRoot(ctx context.Context, client *telegram.Client, peer tg.Input
 	const attempts = 2
 	var lastErr error
 	for attempt := 0; attempt < attempts; attempt++ {
-		runErr := runDownload(ctx, client, info.Location, file, info.Name, bar, threads)
+		runErr := runDownload(ctx, client, info, file, bar, threads)
 		if runErr == nil {
 			if err := ctx.Err(); err != nil {
 				return err
@@ -255,16 +251,13 @@ func downloadOneRoot(ctx context.Context, client *telegram.Client, peer tg.Input
 // 必须用 client.Download() 而不是 downloader.NewDownloader().Download(api, loc)：
 // 后者的 allowCDN 是 nil 且 *tg.Client 不实现 downloader.CDNProvider，
 // 会被 builder 兜底回退到 legacy 路径，等于让 Options.AllowCDN 失效。
-func runDownload(ctx context.Context, client *telegram.Client, loc tg.InputFileLocationClass, file *os.File, name string, bar *progressBar, threads int) error {
-	if err := file.Truncate(0); err != nil {
-		return fmt.Errorf("重置临时文件失败: %w", err)
-	}
-	if _, err := file.Seek(0, io.SeekStart); err != nil {
-		return fmt.Errorf("重置临时文件偏移失败: %w", err)
+func runDownload(ctx context.Context, client *telegram.Client, info *mediaInfo, file *os.File, bar *progressBar, threads int) error {
+	if err := prepareDownloadFile(ctx, file, info); err != nil {
+		return err
 	}
 	bar.reset()
 
-	err := fetch(ctx, client.Download(loc), file, bar, threads)
+	err := fetch(ctx, client.Download(info.Location), file, bar, threads)
 	if err == nil {
 		return file.Sync()
 	}
@@ -274,27 +267,44 @@ func runDownload(ctx context.Context, client *telegram.Client, loc tg.InputFileL
 	if ctx.Err() != nil {
 		return err
 	}
-	firstErr := err
 	// 换行打印，免得被进行中的进度行覆盖
-	fmt.Fprintf(os.Stderr, "\nCDN 下载失败，降级到主 DC 重试: %s（%v）\n", name, firstErr)
+	fmt.Fprintf(os.Stderr, "\nCDN 下载失败，降级到主 DC 重试: %s（%v）\n", info.Name, err)
 
-	if truncErr := file.Truncate(0); truncErr != nil {
-		return fmt.Errorf("重置临时文件失败: %w", truncErr)
-	}
-	// Truncate 只改文件长度、不改写偏移：单线程走的是顺序写（Stream），
-	// 不回到开头会把降级后的数据接在上一轮的偏移后面，产出带空洞的坏文件。
-	if _, seekErr := file.Seek(0, io.SeekStart); seekErr != nil {
-		return fmt.Errorf("重置临时文件偏移失败: %w", seekErr)
+	if err := prepareDownloadFile(ctx, file, info); err != nil {
+		return err
 	}
 	bar.reset()
 	// 显式关掉 CDN：这条路径就是要走主 DC（不带 cdn_supported 重新请求），
 	// 不能依赖「NewDownloader 默认 allowCDN 为 nil」这个实现细节。
-	legacy := downloader.NewDownloader().WithAllowCDN(false).Download(client.API(), loc).
+	legacy := downloader.NewDownloader().WithAllowCDN(false).Download(client.API(), info.Location).
 		WithVerify(true)
 	if err := fetch(ctx, legacy, file, bar, threads); err != nil {
 		return fmt.Errorf("CDN 与主 DC 均失败: %w", err)
 	}
 	return file.Sync()
+}
+
+func prepareDownloadFile(ctx context.Context, file *os.File, info *mediaInfo) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := file.Truncate(0); err != nil {
+		return fmt.Errorf("重置临时文件失败: %w", err)
+	}
+	// Truncate 不会重置顺序写入的偏移；预分配也必须在截断之后执行。
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return fmt.Errorf("重置临时文件偏移失败: %w", err)
+	}
+	if info.Size > 0 {
+		supported, err := preallocateFile(file, info.Size)
+		if err != nil {
+			return fmt.Errorf("预分配 %s 失败: %w", humanBytes(info.Size), err)
+		}
+		if !supported {
+			fmt.Fprintf(os.Stderr, "当前系统或文件系统不支持预分配磁盘空间，继续下载: %s\n", info.Name)
+		}
+	}
+	return ctx.Err()
 }
 
 // fetch 按并发数选择 Parallel（WriterAt）或 Stream（Writer）执行一次下载。

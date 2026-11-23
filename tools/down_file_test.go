@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -212,8 +213,23 @@ func TestDownloadReturnsCancellation(t *testing.T) {
 		return nil
 	})
 	peer := &Peer{Input: &tg.InputPeerChannel{ChannelID: 7}, Title: "test", ID: 7}
-	if err := Download(ctx, client, peer, DownloadOptions{SavePath: dir, Threads: 1}); !errors.Is(err, context.Canceled) {
-		t.Fatalf("取消被吞掉：%v", err)
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	stdout := os.Stdout
+	os.Stdout = w
+	downloadErr := Download(ctx, client, peer, DownloadOptions{SavePath: dir, Threads: 1})
+	os.Stdout = stdout
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if !errors.Is(downloadErr, context.Canceled) {
+		t.Fatalf("取消被吞掉：%v", downloadErr)
+	}
+	if out, err := io.ReadAll(r); err != nil || len(out) != 0 {
+		t.Fatalf("取消不应输出下载失败或完成：%q，读取错误=%v", out, err)
 	}
 	if err := filepath.WalkDir(dir, func(path string, entry os.DirEntry, err error) error {
 		if err == nil && !entry.IsDir() {
@@ -235,7 +251,7 @@ func TestDownloadReportsFailuresAndContinues(t *testing.T) {
 				case *tg.MessagesGetHistoryRequest:
 					var msgs []tg.MessageClass
 					for id := 2; id >= 1; id-- {
-						msgs = append(msgs, &tg.Message{ID: id, Date: 1700000000,
+						msgs = append(msgs, &tg.Message{ID: id, Date: 1700000000 + id*40*86400,
 							PeerID: &tg.PeerChannel{ChannelID: 7},
 							Media:  &tg.MessageMediaDocument{Document: &tg.Document{ID: int64(id), Size: int64(len(data)), MimeType: "video/mp4", Attributes: []tg.DocumentAttributeClass{&tg.DocumentAttributeFilename{FileName: fmt.Sprintf("%d.mp4", id)}}}},
 						})
@@ -256,7 +272,8 @@ func TestDownloadReportsFailuresAndContinues(t *testing.T) {
 				return nil
 			})
 			peer := &Peer{Input: &tg.InputPeerChannel{ChannelID: 7}, Title: "test", ID: 7}
-			err := Download(context.Background(), client, peer, DownloadOptions{SavePath: t.TempDir(), Threads: 1})
+			dir := t.TempDir()
+			err := Download(context.Background(), client, peer, DownloadOptions{SavePath: dir, Threads: 1})
 			if (err != nil) != (failures > 0) {
 				t.Errorf("汇总错误=%v，失败数=%d", err, failures)
 			}
@@ -268,6 +285,17 @@ func TestDownloadReportsFailuresAndContinues(t *testing.T) {
 			}
 			if !visited[1] || !visited[2] {
 				t.Errorf("单文件失败后没有继续：%v", visited)
+			}
+			channel := filepath.Join(dir, "test-7")
+			entries, err := os.ReadDir(channel)
+			if err != nil || len(entries) != 2-failures {
+				t.Fatalf("频道目录应只包含成功下载的文件：%v，错误=%v", entries, err)
+			}
+			for id := 1; id <= 2-failures; id++ {
+				path := filepath.Join(channel, fmt.Sprintf("%d.mp4", id))
+				if got, err := os.ReadFile(path); err != nil || !bytes.Equal(got, data) {
+					t.Errorf("文件应直接保存在频道目录：%s，内容=%q，错误=%v", path, got, err)
+				}
 			}
 		})
 	}

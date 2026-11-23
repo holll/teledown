@@ -8,9 +8,11 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/gotd/td/bin"
+	"github.com/gotd/td/tg"
 	"github.com/gotd/td/tgerr"
 )
 
@@ -40,7 +42,7 @@ func floodWait(seconds int) error {
 // 可接受的等待时长：原样把限流错误交回给 SimpleWaiter（它负责真的等待并重试），
 // 同时打出一条中文进度提示。
 func TestFloodLogInvokerPassesRetryableWait(t *testing.T) {
-	inv := &floodLogInvoker{next: &scriptedInvoker{errs: []error{floodWait(20)}}}
+	inv := &floodLogInvoker{middleware: &floodWaitMiddleware{}, next: &scriptedInvoker{errs: []error{floodWait(20)}}}
 
 	out := captureStdout(t, func() {
 		err := inv.Invoke(context.Background(), nil, nil)
@@ -57,7 +59,7 @@ func TestFloodLogInvokerPassesRetryableWait(t *testing.T) {
 // 等待时长超过上限：必须返回一个**不再被识别为限流**的错误，否则 SimpleWaiter
 // 会一直等下去（上限形同虚设）。
 func TestFloodLogInvokerStopsOnTooLongWait(t *testing.T) {
-	inv := &floodLogInvoker{next: &scriptedInvoker{errs: []error{floodWait(int(floodSleepThreshold/time.Second) + 1)}}}
+	inv := &floodLogInvoker{middleware: &floodWaitMiddleware{}, next: &scriptedInvoker{errs: []error{floodWait(int(floodSleepThreshold/time.Second) + 1)}}}
 
 	err := inv.Invoke(context.Background(), nil, nil)
 	if _, isFlood := tgerr.AsFloodWait(err); isFlood {
@@ -70,7 +72,7 @@ func TestFloodLogInvokerStopsOnTooLongWait(t *testing.T) {
 
 // 重试次数用尽后同样要变成非限流错误，让调用方拿到中文提示而不是继续重试。
 func TestFloodLogInvokerStopsAfterMaxRetries(t *testing.T) {
-	inv := &floodLogInvoker{next: &scriptedInvoker{errs: []error{floodWait(1)}}}
+	inv := &floodLogInvoker{middleware: &floodWaitMiddleware{}, next: &scriptedInvoker{errs: []error{floodWait(1)}}}
 
 	for attempt := 1; attempt <= floodMaxRetries; attempt++ {
 		err := inv.Invoke(context.Background(), nil, nil)
@@ -91,7 +93,7 @@ func TestFloodLogInvokerStopsAfterMaxRetries(t *testing.T) {
 // 非限流错误不能被吞掉或改造。
 func TestFloodLogInvokerPassesOtherErrors(t *testing.T) {
 	want := errors.New("boom")
-	inv := &floodLogInvoker{next: &scriptedInvoker{errs: []error{want}}}
+	inv := &floodLogInvoker{middleware: &floodWaitMiddleware{}, next: &scriptedInvoker{errs: []error{want}}}
 
 	if got := inv.Invoke(context.Background(), nil, nil); !errors.Is(got, want) {
 		t.Errorf("非限流错误应原样返回，得到 %v", got)
@@ -123,11 +125,56 @@ func captureStdout(t *testing.T, fn func()) string {
 	return string(out)
 }
 
+func TestFloodWaitMiddlewareSharesCooldownByRPCType(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		m := &floodWaitMiddleware{}
+		ctx := t.Context()
+		start := time.Now()
+		first := &scriptedInvoker{errs: []error{floodWait(5), nil}}
+		done := make(chan error, 1)
+		go func() { done <- m.Handle(first)(ctx, &tg.UploadGetFileRequest{}, nil) }()
+		synctest.Wait()
+		if first.calls != 1 {
+			t.Fatalf("首次分片应已触发限流，实际调用 %d 次", first.calls)
+		}
+
+		next := &scriptedInvoker{}
+		invoke := m.Handle(next)
+		if err := invoke(ctx, &tg.HelpGetConfigRequest{}, nil); err != nil || next.calls != 1 || time.Since(start) != 0 {
+			t.Fatalf("不同类型的请求不应等待：err=%v, calls=%d, elapsed=%s", err, next.calls, time.Since(start))
+		}
+
+		shortCtx, cancel := context.WithTimeout(ctx, time.Second)
+		defer cancel()
+		if err := invoke(shortCtx, &tg.UploadGetFileRequest{}, nil); !errors.Is(err, context.DeadlineExceeded) || next.calls != 1 {
+			t.Fatalf("等待中的请求应该能取消且不发送：err=%v, calls=%d", err, next.calls)
+		}
+		if err := invoke(ctx, &tg.UploadGetFileRequest{}, nil); err != nil || next.calls != 2 || time.Since(start) != 5*time.Second {
+			t.Fatalf("同类请求应等到共享冷却结束：err=%v, calls=%d, elapsed=%s", err, next.calls, time.Since(start))
+		}
+		if err := <-done; err != nil || first.calls != 2 {
+			t.Fatalf("原请求应独立重试成功：err=%v, calls=%d", err, first.calls)
+		}
+	})
+}
+
+func TestFloodWaitMiddlewareSharesCooldownOverLimit(t *testing.T) {
+	m := &floodWaitMiddleware{}
+	next := &scriptedInvoker{errs: []error{floodWait(900)}}
+	invoke := m.Handle(next)
+	for _, want := range []string{"触发限流", "同类请求仍在限流"} {
+		err := invoke(t.Context(), &tg.UploadGetFileRequest{}, nil)
+		if err == nil || !strings.Contains(err.Error(), want) || next.calls != 1 {
+			t.Fatalf("err=%v, calls=%d; 应包含 %q 且只发送一次", err, next.calls, want)
+		}
+	}
+}
+
 func TestFloodWaitMiddlewareDoesNotInvokeCanceledRequest(t *testing.T) {
 	next := &scriptedInvoker{}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	invoke := (floodWaitMiddleware{}).Handle(next)
+	invoke := (&floodWaitMiddleware{}).Handle(next)
 	if err := invoke(ctx, nil, nil); !errors.Is(err, context.Canceled) || next.calls != 0 {
 		t.Fatalf("err = %v, calls = %d; want canceled with no calls", err, next.calls)
 	}
