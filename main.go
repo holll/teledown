@@ -241,7 +241,12 @@ func runUploadCommand(args []string) error {
 		if err != nil {
 			return err
 		}
+		me, err := client.Self(ctx)
+		if err != nil {
+			return fmt.Errorf("获取当前账号的 Premium 状态失败: %w", err)
+		}
 		return tools.Upload(ctx, client.API(), peer, tools.UploadOptions{
+			Premium:     me.Premium && !me.Bot,
 			Path:        *path,
 			DeleteAfter: deleteFlag,
 			Tag:         *tag,

@@ -30,6 +30,17 @@ type UploadOptions struct {
 	DeleteAfter bool
 	Tag         string
 	Threads     int
+	Premium     bool
+}
+
+// Telegram 普通账号最多上传 4000 个分片，每片最多 512 KiB。
+const nonPremiumUploadLimit = int64(4000) * uploader.MaximumPartSize
+
+func checkUploadSize(size int64, premium bool) error {
+	if !premium && size > nonPremiumUploadLimit {
+		return fmt.Errorf("当前账号不是 Premium，文件大小 %d 字节超过单文件上限 %d 字节（2000 MiB）", size, nonPremiumUploadLimit)
+	}
+	return nil
 }
 
 // Upload 上传单个文件或整个目录到目标会话。
@@ -50,6 +61,9 @@ func Upload(ctx context.Context, api *tg.Client, peer *Peer, opt UploadOptions) 
 		if err := uploadOne(ctx, api, peer.Input, path, opt); err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
+			}
+			if !isDir {
+				return fmt.Errorf("上传 %s 失败: %w", filepath.Base(path), err)
 			}
 			fmt.Printf("上传出错 %s: %v\n", filepath.Base(path), err)
 			failed++
@@ -80,6 +94,9 @@ func uploadOne(ctx context.Context, api *tg.Client, peer tg.InputPeerClass, path
 	}
 	if !info.Mode().IsRegular() {
 		return fmt.Errorf("不上传非普通文件: %s", path)
+	}
+	if err := checkUploadSize(info.Size(), opt.Premium); err != nil {
+		return err
 	}
 	name := filepath.Base(path)
 	mimeType := detectMIME(path)

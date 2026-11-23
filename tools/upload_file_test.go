@@ -8,6 +8,27 @@ import (
 	"testing"
 )
 
+func TestCheckUploadSize(t *testing.T) {
+	const limit = int64(2_097_152_000)
+	for _, tc := range []struct {
+		name    string
+		size    int64
+		premium bool
+		wantErr bool
+	}{
+		{"普通账号低于上限", limit - 1, false, false},
+		{"普通账号等于上限", limit, false, false},
+		{"普通账号超出一字节", limit + 1, false, true},
+		{"Premium 不受普通账号上限限制", limit + 1, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := checkUploadSize(tc.size, tc.premium); (err != nil) != tc.wantErr {
+				t.Fatalf("大小预检错误 = %v，预期报错 = %t", err, tc.wantErr)
+			}
+		})
+	}
+}
+
 func TestVideoAttributes(t *testing.T) {
 	for _, tc := range []struct {
 		name, input string
