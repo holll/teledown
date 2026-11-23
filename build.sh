@@ -100,7 +100,30 @@ if [ "$UPLOAD_SUPPORT" = "1" ]; then
             python -m pip install python-magic
             ;;
     esac
-    python -c 'import magic; magic.Magic(mime=True).from_buffer(b"teledown")'
+    if [ "$OS_NAME" = "linux" ]; then
+        MAGIC_DATABASE=''
+        for candidate in /usr/share/misc/magic.mgc /usr/share/file/magic.mgc /usr/lib/file/magic.mgc; do
+            if [ -f "$candidate" ] && [ -r "$candidate" ]; then
+                MAGIC_DATABASE="$candidate"
+                break
+            fi
+        done
+        if [ -z "$MAGIC_DATABASE" ]; then
+            echo '[!] 找不到 magic.mgc，请安装与 libmagic 匹配的规则库（Debian/Ubuntu：libmagic-mgc）' >&2
+            exit 1
+        fi
+        python - "$MAGIC_DATABASE" <<'PY'
+import sys
+import magic
+
+rules = magic.Magic(mime=True, magic_file=sys.argv[1])
+mime = rules.from_buffer(b'GIF89a\x01\x00\x01\x00\x00\x00\x00')
+if mime != 'image/gif':
+    sys.exit(f'构建机的 libmagic 未能使用 {sys.argv[1]} 识别 GIF（{mime}）')
+PY
+    else
+        python -c 'import magic; magic.Magic(mime=True).from_buffer(b"teledown")'
+    fi
 else
     echo "[*] 跳过上传相关依赖（moviepy / Pillow / python-magic）"
 fi
@@ -180,6 +203,12 @@ COLLECT_ARGS=(--collect-data demoji)
 EXCLUDE_ARGS=(--exclude-module tkinter --exclude-module _tkinter)
 if [ "$UPLOAD_SUPPORT" = "1" ]; then
     COLLECT_ARGS+=(--collect-submodules moviepy)
+    if [ "$OS_NAME" = "linux" ]; then
+        COLLECT_ARGS+=(
+            --add-data "$MAGIC_DATABASE:teledown-magic"
+            --add-data "$PROJECT_DIR/packaging/COPYING.libmagic:teledown-magic"
+        )
+    fi
 else
     # 精简版：显式排除上传相关依赖（含 moviepy 依赖的 imageio/ffmpeg 二进制）
     EXCLUDE_ARGS+=(
@@ -207,7 +236,7 @@ BINARY_PATH="dist/$FINAL_NAME"
 if [ "$OS_NAME" = "windows" ]; then
     BINARY_PATH+=.exe
 fi
-python - "$BINARY_PATH" <<'PY'
+python - "$BINARY_PATH" "$OS_NAME" "$UPLOAD_SUPPORT" <<'PY'
 import re
 import sys
 from PyInstaller.archive.readers import CArchiveReader
@@ -219,6 +248,15 @@ for entry in archive.toc:
         r'(?:ffmpeg|ffprobe)(?:-[^.]+(?:\.[^.]+)*)?(?:\.exe)?', path.rsplit('/', 1)[-1]
     ):
         sys.exit(f'构建意外内置 FFmpeg 资源：{entry}')
+
+if sys.argv[2] == 'linux':
+    rules = 'teledown-magic/magic.mgc'
+    notice = 'teledown-magic/COPYING.libmagic'
+    has_libmagic = any(re.fullmatch(r'libmagic\.so(?:\..+)?', entry) for entry in archive.toc)
+    if sys.argv[3] == '1' and (not has_libmagic or rules not in archive.toc or notice not in archive.toc):
+        sys.exit('Linux 全功能版缺少 libmagic、magic.mgc 或版权声明')
+    if sys.argv[3] != '1' and (has_libmagic or rules in archive.toc or notice in archive.toc):
+        sys.exit('Linux 精简版意外包含 libmagic 资源')
 PY
 
 # ------------------------------------------------------------

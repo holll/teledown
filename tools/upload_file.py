@@ -10,7 +10,7 @@ from io import BytesIO
 from telethon import TelegramClient
 from telethon.tl.types import DocumentAttributeVideo, PeerChannel
 
-from tools.tool import configure_ffmpeg, get_all_files, get_thumb, str2join, get_filetype, UserAbort
+from tools.tool import external_ffmpeg, get_all_files, get_thumb, str2join, get_filetype, UserAbort
 from tools.tqdm import TqdmUpTo
 
 
@@ -20,12 +20,12 @@ NON_PREMIUM_UPLOAD_LIMIT = 4_000 * 512 * 1024
 
 
 def get_video_attributes(file_path: str) -> DocumentAttributeVideo:
-    configure_ffmpeg()
-    from moviepy import VideoFileClip
+    with external_ffmpeg():
+        from moviepy import VideoFileClip
 
-    with VideoFileClip(file_path, audio=False) as video:
-        duration = video.duration
-        width, height = video.size
+        with VideoFileClip(file_path, audio=False) as video:
+            duration = video.duration
+            width, height = video.size
     if duration is None or not math.isfinite(duration) or duration <= 0:
         raise ValueError('未读取到有效的视频时长')
     return DocumentAttributeVideo(

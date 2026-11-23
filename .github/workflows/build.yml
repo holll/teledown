@@ -86,7 +86,30 @@ jobs:
           "$py" -m unittest discover -s tests -v
           test -f "$binary"
           "$binary" --help
-          "$binary" self-test "$VARIANT"
+          if [ "$RUNNER_OS" = Linux ] && [ "$VARIANT" = full ]; then
+            # FFmpeg must see the original environment, not the PyInstaller extraction dir.
+            export REAL_FFMPEG="$(command -v ffmpeg)"
+            probe_dir="$(mktemp -d "$RUNNER_TEMP/teledown-ffmpeg.XXXXXXXX")"
+            cat > "$probe_dir/ffmpeg" <<'EOF'
+          #!/bin/sh
+          if [ "${LD_LIBRARY_PATH-}" != "$EXPECTED_FFMPEG_LIBRARY_PATH" ]; then
+            printf '%s\n' "FFmpeg inherited an unexpected LD_LIBRARY_PATH: ${LD_LIBRARY_PATH-}" >&2
+            exit 1
+          fi
+          exec "$REAL_FFMPEG" "$@"
+          EOF
+            chmod +x "$probe_dir/ffmpeg"
+            # 宿主的文本规则既不应影响识别，也不应触发 libmagic 回退警告。
+            printf '# empty rules\n' > "$probe_dir/first.magic"
+            printf '# empty rules\n' > "$probe_dir/second.magic"
+            result=$(LD_LIBRARY_PATH="$probe_dir" EXPECTED_FFMPEG_LIBRARY_PATH="$probe_dir" \
+              MAGIC="$probe_dir/first.magic:$probe_dir/second.magic" FFMPEG_BINARY="$probe_dir/ffmpeg" \
+              "$binary" self-test full 2>&1) || { printf '%s\n' "$result"; exit 1; }
+            printf '%s\n' "$result"
+            case "$result" in *'using regular magic file'*) exit 1;; esac
+          else
+            "$binary" self-test "$VARIANT"
+          fi
 
       - name: 上传构建产物
         uses: actions/upload-artifact@v4

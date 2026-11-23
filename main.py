@@ -16,7 +16,7 @@ from tools.down_file import down_group
 from tools.monit import start_monitor
 from tools.sign import batch_sign
 from tools.tool import (run_hook, init_db, md5, print_all_channel, print_group, set_chat_alias,
-                        parse_message_range, configure_ffmpeg, get_filetype, get_thumb, UserAbort)
+                        parse_message_range, external_ffmpeg, get_filetype, get_thumb, UserAbort)
 from tools.upload_file import get_video_attributes, upload_file
 
 # Telethon 默认为 60 秒：等待时间超过该值的 FLOOD_WAIT 会直接抛错，
@@ -258,13 +258,13 @@ def check_build_variant(variant: str) -> None:
     if variant == 'noupload':
         return
 
-    configure_ffmpeg()
-    from moviepy import ColorClip
-
     with TemporaryDirectory(prefix='teledown-self-test-') as temp_dir:
         sample = str(Path(temp_dir) / 'sample.mp4')
-        with ColorClip((32, 32), color=(0, 0, 0), duration=0.5) as clip:
-            clip.write_videofile(sample, fps=4, codec='libx264', audio=False, logger=None, threads=1)
+        with external_ffmpeg():
+            from moviepy import ColorClip
+
+            with ColorClip((32, 32), color=(0, 0, 0), duration=0.5) as clip:
+                clip.write_videofile(sample, fps=4, codec='libx264', audio=False, logger=None, threads=1)
         mime_type = get_filetype(sample)
         if not mime_type.startswith('video/'):
             raise RuntimeError(f'视频文件 MIME 识别错误：{mime_type}')

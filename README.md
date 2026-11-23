@@ -177,6 +177,8 @@ python main.py monit -id 3333,4444 -user @someone,@another --prefix "*.pdf"
 
 两个变体均不内置 FFmpeg。下载、监控、普通文件上传不需要 FFmpeg；上传视频或运行全功能版自检前，请安装 FFmpeg（Debian/Ubuntu：`sudo apt install ffmpeg`；Windows：`winget install --id Gyan.FFmpeg -e`），确认 `ffmpeg -version` 可运行。也可以通过环境变量 `FFMPEG_BINARY` 指定可执行文件的完整路径。自检使用 `libx264` 生成测试视频。
 
+Linux 全功能版内置 `libmagic` 和构建时匹配的 `magic.mgc`，识别文件类型时不依赖运行机器的规则库；源码运行仍使用系统规则。Debian/Ubuntu 上构建全功能版前，请安装 `libmagic1` 和 `libmagic-mgc`。
+
 两个变体均用 Python 标准库导出 CSV，不依赖 pandas，且不打包 Tcl/Tk。实际体积会随平台和依赖版本变化。
 
 本地构建：

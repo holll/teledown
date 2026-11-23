@@ -5,9 +5,11 @@ import os
 import re
 import shutil
 import subprocess
-from pathlib import Path
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
 from io import BytesIO
+from pathlib import Path
 from typing import Optional
 
 import demoji
@@ -276,14 +278,39 @@ def configure_ffmpeg() -> None:
     os.environ['FFMPEG_BINARY'] = str(Path(executable).absolute())
 
 
+@contextmanager
+def external_ffmpeg() -> Iterator[None]:
+    """让 MoviePy 启动的 FFmpeg 使用打包程序启动前的系统库路径。"""
+    configure_ffmpeg()
+    if sys.platform != 'linux' or not getattr(sys, 'frozen', False):
+        yield
+        return
+
+    key = 'LD_LIBRARY_PATH'
+    bundled_path = os.environ.get(key)
+    original_path = os.environ.get(f'{key}_ORIG')
+    # MoviePy 不提供子进程 env 参数。仅在同步调用期间切换，不跨 await。
+    if original_path:
+        os.environ[key] = original_path
+    else:
+        os.environ.pop(key, None)
+    try:
+        yield
+    finally:
+        if bundled_path is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = bundled_path
+
+
 def get_thumb(file_path: str) -> bytes:
     """从视频文件提取第一帧作为缩略图。"""
-    configure_ffmpeg()
-    from PIL import Image
-    from moviepy import VideoFileClip
+    with external_ffmpeg():
+        from PIL import Image
+        from moviepy import VideoFileClip
 
-    with VideoFileClip(file_path, audio=False) as video:
-        video_image = video.get_frame(0)
+        with VideoFileClip(file_path, audio=False) as video:
+            video_image = video.get_frame(0)
 
     video_image = Image.fromarray(video_image)
     thumb_bytes_io = BytesIO()
@@ -307,8 +334,22 @@ def str2join(*args) -> str:
 
 
 def get_filetype(path: str) -> str:
-    import magic
-    magic_obj = magic.Magic(mime=True)
+    magic_database = None
+    if sys.platform == 'linux' and getattr(sys, 'frozen', False):
+        magic_database = str(Path(sys._MEIPASS) / 'teledown-magic' / 'magic.mgc')
+        original_magic = os.environ.get('MAGIC')
+        os.environ['MAGIC'] = magic_database
+        try:
+            # python-magic 在导入时也会初始化兼容层的默认规则库。
+            import magic
+        finally:
+            if original_magic is None:
+                os.environ.pop('MAGIC', None)
+            else:
+                os.environ['MAGIC'] = original_magic
+    else:
+        import magic
+    magic_obj = magic.Magic(mime=True, magic_file=magic_database)
     with open(path, 'rb') as f:
         file_content = f.read(1024)
         return magic_obj.from_buffer(file_content)

@@ -1,4 +1,5 @@
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -8,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from telethon.extensions import BinaryReader
 from telethon.tl.types import DocumentAttributeVideo
 
-from tools.tool import UserAbort, configure_ffmpeg
+from tools.tool import UserAbort, configure_ffmpeg, external_ffmpeg
 from tools.upload_file import upload_file
 
 
@@ -33,6 +34,35 @@ class FFmpegConfigTests(unittest.TestCase):
                 configure_ffmpeg()
 
 
+class FFmpegRuntimeTests(unittest.TestCase):
+    def test_frozen_linux_hides_bundled_libraries_and_restores_path(self):
+        for original in ({}, {'LD_LIBRARY_PATH_ORIG': '/opt/system/lib'}):
+            with self.subTest(original=original), \
+                    patch.dict(os.environ, {'LD_LIBRARY_PATH': '/tmp/_MEI123', **original}, clear=True), \
+                    patch.object(sys, 'platform', 'linux'), patch.object(sys, 'frozen', True, create=True), \
+                    patch('tools.tool.configure_ffmpeg'):
+                with external_ffmpeg():
+                    self.assertEqual(os.environ.get('LD_LIBRARY_PATH'), original.get('LD_LIBRARY_PATH_ORIG'))
+                self.assertEqual(os.environ['LD_LIBRARY_PATH'], '/tmp/_MEI123')
+
+    def test_frozen_linux_restores_environment_on_failure(self):
+        with patch.dict(os.environ, {'LD_LIBRARY_PATH_ORIG': '/opt/system/lib'}, clear=True), \
+                patch.object(sys, 'platform', 'linux'), patch.object(sys, 'frozen', True, create=True), \
+                patch('tools.tool.configure_ffmpeg'):
+            with self.assertRaisesRegex(OSError, 'probe failed'), external_ffmpeg():
+                self.assertEqual(os.environ['LD_LIBRARY_PATH'], '/opt/system/lib')
+                raise OSError('probe failed')
+            self.assertNotIn('LD_LIBRARY_PATH', os.environ)
+
+    def test_source_linux_and_frozen_windows_keep_their_environment(self):
+        for platform, frozen in (('linux', False), ('win32', True)):
+            with self.subTest(platform=platform), patch.dict(os.environ, {'LD_LIBRARY_PATH': '/opt/user/lib'}), \
+                    patch.object(sys, 'platform', platform), patch.object(sys, 'frozen', frozen, create=True), \
+                    patch('tools.tool.configure_ffmpeg'):
+                with external_ffmpeg():
+                    self.assertEqual(os.environ['LD_LIBRARY_PATH'], '/opt/user/lib')
+
+
 class UploadFFmpegTests(unittest.IsolatedAsyncioTestCase):
     async def test_uploading_regular_file_does_not_require_ffmpeg(self):
         client = AsyncMock()
@@ -41,7 +71,7 @@ class UploadFFmpegTests(unittest.IsolatedAsyncioTestCase):
             sample.write_text('test', encoding='utf-8')
             with patch('tools.upload_file.find_spec', return_value=object()), \
                     patch('tools.upload_file.get_filetype', return_value='text/plain'), \
-                    patch('tools.upload_file.configure_ffmpeg') as configure:
+                    patch('tools.tool.configure_ffmpeg') as configure:
                 await upload_file(client, 'me', str(sample), False, None)
         configure.assert_not_called()
         client.upload_file.assert_awaited_once()
@@ -54,7 +84,7 @@ class UploadFFmpegTests(unittest.IsolatedAsyncioTestCase):
             sample.write_bytes(b'test')
             with patch('tools.upload_file.find_spec', return_value=object()), \
                     patch('tools.upload_file.get_filetype', return_value='video/mp4'), \
-                    patch('tools.upload_file.configure_ffmpeg', side_effect=UserAbort('找不到可执行的 FFmpeg')):
+                    patch('tools.tool.configure_ffmpeg', side_effect=UserAbort('找不到可执行的 FFmpeg')):
                 with self.assertRaisesRegex(UserAbort, 'FFmpeg'):
                     await upload_file(client, 'me', str(sample), True, None)
             self.assertTrue(sample.exists())
@@ -70,7 +100,7 @@ class UploadFFmpegTests(unittest.IsolatedAsyncioTestCase):
             sample.write_bytes(b'test')
             with patch('tools.upload_file.find_spec', return_value=object()), \
                     patch('tools.upload_file.get_filetype', return_value='video/mp4'), \
-                    patch('tools.upload_file.configure_ffmpeg'), \
+                    patch('tools.tool.configure_ffmpeg'), \
                     patch.dict('sys.modules', {'moviepy': SimpleNamespace(VideoFileClip=clip)}), \
                     patch('tools.upload_file.get_thumb', side_effect=OSError('test thumbnail failure')):
                 await upload_file(client, 'me', str(sample), False, None)
