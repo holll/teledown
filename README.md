@@ -19,8 +19,8 @@
 | 视频缩略图 | **已实现**，改用 ffmpeg 抽首帧（Python 版是 moviepy + Pillow）。缩略图最大宽 320px，小于该宽度不放大；ffmpeg 缺失或抽帧失败时只提示不阻断上传 |
 | 发送者过滤 | Python 版的 `-user` 参数未移植 |
 | Emoji 处理 | 只覆盖常见 Unicode 区段，与 Python 的 `demoji` 全量表情表相比是近似实现 |
-| 扩展名推导 | `ExtensionForMIME` 是精选表（70 余项，按 Telegram 实际会下发的 `mime_type` 收录），未收录的退回 `.bin`；Python 版走 `mimetypes.guess_extension`，表更大 |
-| 视频类型判定 | 按扩展名判定（`mime.TypeByExtension`，Windows 上会读注册表）；Python 版用 libmagic 嗅探文件头，文件内容与扩展名不符时行为不同 |
+| 下载扩展名 | 优先保留消息里的原文件名；无原名时，用不区分大小写、忽略参数的 MIME 映射推导后缀，未收录的退回 `.bin`。Python 版的 `mimetypes.guess_extension` 覆盖更广 |
+| 上传类型判定 | 用 Go 标准库识别文件头（最多读前 512 字节）；可辨识的类型优先于扩展名，纯文本和 ZIP 等共用文件头时保留适用的扩展名类型。无法识别时按扩展名回退；WebM 与 Matroska 依赖后缀区分。不依赖 libmagic，覆盖范围也不等同于 Python 版 |
 
 ### 能力增强
 

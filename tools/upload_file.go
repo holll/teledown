@@ -6,10 +6,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"math"
 	"mime"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -41,6 +44,40 @@ func checkUploadSize(size int64, premium bool) error {
 		return fmt.Errorf("当前账号不是 Premium，文件大小 %d 字节超过单文件上限 %d 字节（2000 MiB）", size, nonPremiumUploadLimit)
 	}
 	return nil
+}
+
+type uploadPartRetryClient struct {
+	uploader.Client
+}
+
+func (c uploadPartRetryClient) UploadSaveFilePart(ctx context.Context, req *tg.UploadSaveFilePartRequest) (bool, error) {
+	return retryUploadPart(ctx, func() (bool, error) { return c.Client.UploadSaveFilePart(ctx, req) })
+}
+
+func (c uploadPartRetryClient) UploadSaveBigFilePart(ctx context.Context, req *tg.UploadSaveBigFilePartRequest) (bool, error) {
+	return retryUploadPart(ctx, func() (bool, error) { return c.Client.UploadSaveBigFilePart(ctx, req) })
+}
+
+func retryUploadPart(ctx context.Context, send func() (bool, error)) (bool, error) {
+	const maxRetries = 2
+	for attempt := 0; ; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		ok, err := send()
+		// gotd 对已确认但未收到结果的请求返回包装过的 context.Canceled，
+		// 没有独立错误类型。这里只重发相同文件 ID、片号和内容，不重发媒体消息。
+		if attempt == maxRetries || !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "engine forcibly closed:") {
+			return ok, err
+		}
+		timer := time.NewTimer(time.Second << attempt)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return false, ctx.Err()
+		case <-timer.C:
+		}
+	}
 }
 
 // Upload 上传单个文件或整个目录到目标会话。
@@ -139,7 +176,8 @@ func uploadOne(ctx context.Context, api *tg.Client, peer tg.InputPeerClass, path
 		}
 	}()
 
-	up := uploader.NewUploader(api).WithThreads(opt.Threads).WithProgress(bar)
+	partClient := uploadPartRetryClient{Client: api}
+	up := uploader.NewUploader(partClient).WithThreads(opt.Threads).WithProgress(bar)
 	// 用 FromPath 而不是自己 os.Open：它内部负责关闭句柄，
 	// 而 Windows 上句柄未关闭时 os.Remove 一定会失败（-dau Y 会删不掉源文件）。
 	uploaded, err := up.FromPath(ctx, path)
@@ -150,7 +188,7 @@ func uploadOne(ctx context.Context, api *tg.Client, peer tg.InputPeerClass, path
 	var thumbInput tg.InputFileClass
 	if len(thumbData) > 0 {
 		// 缩略图很小，不再单独显示进度
-		input, err := uploader.NewUploader(api).FromBytes(ctx, "thumb.jpg", thumbData)
+		input, err := uploader.NewUploader(partClient).FromBytes(ctx, "thumb.jpg", thumbData)
 		if err != nil {
 			fmt.Printf("提示：%s 缩略图上传失败（%v），改以无缩略图上传\n", name, err)
 		} else {
@@ -219,13 +257,74 @@ func collectFiles(path string) (files []string, isDir bool, err error) {
 	return files, true, nil
 }
 
-// detectMIME 优先按扩展名判断，识别不出时退回通用二进制类型。
+// detectMIME 识别文件头；无法区分格式时，优先保留兼容的扩展名类型。
 func detectMIME(path string) string {
-	if t := mime.TypeByExtension(filepath.Ext(path)); t != "" {
-		base, _, _ := strings.Cut(t, ";")
-		return strings.TrimSpace(base)
+	const binary = "application/octet-stream"
+	ext := strings.ToLower(filepath.Ext(path))
+	byExt := baseMIME(mime.TypeByExtension(ext))
+	if byExt == "" {
+		byExt = binary
 	}
-	return "application/octet-stream"
+	f, err := os.Open(path)
+	if err != nil {
+		return byExt
+	}
+	defer f.Close()
+
+	var header [512]byte
+	n, err := io.ReadFull(f, header[:])
+	if n == 0 || (err != nil && err != io.ErrUnexpectedEOF) {
+		return byExt
+	}
+	byHeader := baseMIME(http.DetectContentType(header[:n]))
+	switch byHeader {
+	case binary:
+		return byExt
+	case "text/plain":
+		switch ext {
+		case ".csv":
+			// Windows 注册表可能把 CSV 映射到旧版 Excel 工作簿类型。
+			return "text/csv"
+		case ".srt":
+			return "application/x-subrip"
+		}
+		if byExt != binary {
+			return byExt
+		}
+	case "text/xml":
+		if strings.HasSuffix(byExt, "+xml") || byExt == "application/xml" {
+			return byExt
+		}
+	case "application/zip":
+		if strings.HasSuffix(byExt, "+zip") || strings.HasPrefix(byExt, "application/vnd.openxmlformats-officedocument.") ||
+			strings.HasSuffix(byExt, ".macroenabled.12") || byExt == "application/vnd.android.package-archive" || byExt == "application/java-archive" {
+			return byExt
+		}
+	case "application/ogg":
+		if strings.HasSuffix(byExt, "/ogg") || byExt == "audio/opus" {
+			return byExt
+		}
+	case "video/mp4":
+		switch byExt {
+		case "audio/mp4", "audio/x-m4a", "video/x-m4v", "video/quicktime":
+			return byExt
+		}
+	case "video/webm":
+		// 标准库只检查 EBML 魔数，无法区分 WebM 和 Matroska。
+		switch ext {
+		case ".webm":
+			return "video/webm"
+		case ".weba":
+			return "audio/webm"
+		case ".mkv":
+			return "video/x-matroska"
+		case ".mka":
+			return "audio/x-matroska"
+		default:
+			return binary
+		}
+	}
+	return byHeader
 }
 
 // ffprobeResult 只取需要的字段。

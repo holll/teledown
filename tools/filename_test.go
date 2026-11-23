@@ -184,6 +184,12 @@ func TestExtensionForMIMEExpandedTable(t *testing.T) {
 		"application/x-subrip":           ".srt",
 		"text/x-python":                  ".py",
 		"IMAGE/JPEG":                     ".jpg", // 大小写无关
+		" video/MP2T ; charset=binary ":  ".ts",
+		"application/x-rar":              ".rar",
+		"application/x-zip":              ".zip",
+		"audio/wave":                     ".wav",
+		"application/ogg":                ".ogg",
+		"video/x-ms-asf":                 ".asf",
 		"application/x-unknown-vendor":   ".bin", // 未收录仍退回 .bin
 		"application/x-tgsticker-custom": ".bin",
 	}

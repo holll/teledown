@@ -121,6 +121,7 @@ var mimeExtensions = map[string]string{
 	"video/mpeg":       ".mpeg",
 	"video/3gpp":       ".3gp",
 	"video/mp2t":       ".ts",
+	"video/x-ms-asf":   ".asf",
 	"video/x-m4v":      ".m4v",
 	// 图片
 	"image/jpeg":    ".jpg",
@@ -133,22 +134,27 @@ var mimeExtensions = map[string]string{
 	"image/svg+xml": ".svg",
 	"image/avif":    ".avif",
 	// 音频
-	"audio/mpeg":   ".mp3",
-	"audio/mp4":    ".m4a",
-	"audio/x-m4a":  ".m4a",
-	"audio/ogg":    ".ogg",
-	"audio/opus":   ".opus",
-	"audio/flac":   ".flac",
-	"audio/x-flac": ".flac",
-	"audio/wav":    ".wav",
-	"audio/x-wav":  ".wav",
-	"audio/aac":    ".aac",
-	"audio/webm":   ".weba",
-	"audio/amr":    ".amr",
+	"audio/mpeg":       ".mp3",
+	"audio/mp4":        ".m4a",
+	"audio/x-m4a":      ".m4a",
+	"audio/ogg":        ".ogg",
+	"audio/opus":       ".opus",
+	"audio/flac":       ".flac",
+	"audio/x-flac":     ".flac",
+	"audio/wav":        ".wav",
+	"audio/x-wav":      ".wav",
+	"audio/wave":       ".wav",
+	"application/ogg":  ".ogg",
+	"audio/aac":        ".aac",
+	"audio/webm":       ".weba",
+	"audio/x-matroska": ".mka",
+	"audio/amr":        ".amr",
 	// 压缩包与可执行文件
 	"application/zip":                               ".zip",
+	"application/x-zip":                             ".zip",
 	"application/x-7z-compressed":                   ".7z",
 	"application/x-rar-compressed":                  ".rar",
+	"application/x-rar":                             ".rar",
 	"application/vnd.rar":                           ".rar",
 	"application/x-tar":                             ".tar",
 	"application/gzip":                              ".gz",
@@ -191,9 +197,14 @@ var mimeExtensions = map[string]string{
 	"application/x-bittorrent": ".torrent",
 }
 
+func baseMIME(value string) string {
+	base, _, _ := strings.Cut(value, ";")
+	return strings.ToLower(strings.TrimSpace(base))
+}
+
 // ExtensionForMIME 由 MIME 推测扩展名，未知时退回 .bin。
 func ExtensionForMIME(mime string) string {
-	if ext, ok := mimeExtensions[strings.ToLower(strings.TrimSpace(mime))]; ok {
+	if ext, ok := mimeExtensions[baseMIME(mime)]; ok {
 		return ext
 	}
 	return ".bin"
