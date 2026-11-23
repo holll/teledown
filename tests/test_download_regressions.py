@@ -1,14 +1,16 @@
+import errno
 import io
 import os
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from telethon.errors import FileReferenceExpiredError
-from telethon.tl.types import MessageMediaPhoto, PeerChannel
+from telethon.tl.types import MessageMediaDocument, MessageMediaPhoto, PeerChannel
 
 from main import build_parser, handle_download
 from tools.down_file import DownloadResult, down_group, download_file, safe_path_component
@@ -89,6 +91,24 @@ class DownloadTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(result, DownloadResult.SKIPPED)
         self.assertEqual(message.download_media.await_count, 1)
 
+    async def test_message_time_filters_include_boundaries_and_preserve_id_order(self):
+        since = datetime(2026, 9, 1, 4, 30, tzinfo=timezone.utc)
+        until = since + timedelta(minutes=1)
+        candidates = []
+        for i, sent_at in enumerate((since - timedelta(seconds=1), since, until,
+                                     until + timedelta(seconds=1), None), start=81):
+            msg = photo(write_media, message_id=i)
+            msg.date = sent_at
+            candidates.append(msg)
+        for bounds, expected in (({'since': since, 'until': until}, [82, 83]),
+                                 ({'since': since}, [82, 83, 84]),
+                                 ({'until': until}, [81, 82, 83])):
+            with self.subTest(bounds=bounds), patch('tools.down_file.get_history_message', AsyncMock(
+                return_value=('channel', stream(*candidates))
+            )), patch('tools.down_file.download_file', AsyncMock(return_value=DownloadResult.DOWNLOADED)) as download:
+                self.assertTrue(await down_group(object(), 12345, {'min_id': 80, 'reverse': True}, None, None, **bounds))
+                self.assertEqual([call.args[3].id for call in download.await_args_list], expected)
+
     async def test_linked_subdirectory_is_not_used(self):
         with TemporaryDirectory() as other:
             try:
@@ -112,6 +132,60 @@ class DownloadTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('下载成功 1，跳过 1，失败 1', self.stdout.getvalue())
         self.assertIn('simulated write failure', self.stderr.getvalue())
         self.assertEqual([p.name for p in (self.root / 'channel-12345').iterdir()], ['good.jpg'])
+
+    async def test_disk_full_before_transfer_never_downloads_or_leaves_partial(self):
+        message = photo(write_media)
+        backend = 'tools.down_file._allocate_windows' if os.name == 'nt' else 'tools.down_file.os.posix_fallocate'
+        with patch(backend, side_effect=OSError(errno.ENOSPC, 'full'), create=True):
+            result = await download_file(object(), 'channel', 12345, message)
+        self.assertIs(result, DownloadResult.FAILED)
+        message.download_media.assert_not_awaited()
+        self.assertIn('下载空间不足', self.stderr.getvalue())
+        self.assertEqual(list((self.root / 'channel-12345').iterdir()), [])
+
+    async def test_unsupported_allocation_checks_space_before_transfer(self):
+        backend = 'tools.down_file._allocate_windows' if os.name == 'nt' else 'tools.down_file.os.posix_fallocate'
+        with patch(backend, side_effect=OSError(errno.ENOTSUP, 'unsupported'), create=True), patch(
+            'tools.down_file.shutil.disk_usage'
+        ) as usage:
+            insufficient = photo(write_media, name='blocked.jpg')
+            usage.return_value = SimpleNamespace(free=3)
+            self.assertIs(await download_file(object(), 'channel', 12345, insufficient), DownloadResult.FAILED)
+            insufficient.download_media.assert_not_awaited()
+            usage.return_value = SimpleNamespace(free=4)
+            self.assertIs(await download_file(object(), 'channel', 12345, photo(write_media)), DownloadResult.DOWNLOADED)
+        self.assertIn('仅检查了当前可用空间', self.stderr.getvalue())
+
+    async def test_reserved_bytes_cannot_mask_short_download(self):
+        def emulate_allocation(output, _directory, size):
+            output.truncate(size)
+
+        async def short(output, **_):
+            self.assertEqual(output.tell(), 0)
+            self.assertEqual(os.fstat(output.fileno()).st_size, 4)
+            output.write(b'da')
+            return output
+
+        document = photo(short, name='file.bin')
+        document.media = MessageMediaDocument()
+        with patch('tools.down_file._reserve_download_space', side_effect=emulate_allocation):
+            self.assertIs(await download_file(object(), 'channel', 12345, document), DownloadResult.FAILED)
+            self.assertIs(await download_file(object(), 'channel', 12345, photo(short)), DownloadResult.DOWNLOADED)
+        directory = self.root / 'channel-12345'
+        self.assertFalse((directory / 'file.bin').exists())
+        self.assertEqual((directory / 'file.jpg').read_bytes(), b'da')
+        self.assertIn('下载大小不符', self.stderr.getvalue())
+
+    async def test_unknown_size_does_not_request_allocation(self):
+        message = photo(write_media)
+        message.file.size = None
+        with patch('tools.down_file._allocate_windows') as windows, patch(
+            'tools.down_file.os.posix_fallocate', create=True
+        ) as posix, patch('tools.down_file.shutil.disk_usage') as usage:
+            self.assertIs(await download_file(object(), 'channel', 12345, message), DownloadResult.DOWNLOADED)
+        windows.assert_not_called()
+        posix.assert_not_called()
+        usage.assert_not_called()
 
     async def test_photo_retry_restarts_partial_from_empty(self):
         async def expired(output, **_):

@@ -1,7 +1,9 @@
 import argparse
 import importlib.util
 import os
+import re
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Dict, Optional
@@ -29,6 +31,20 @@ def parse_range_arg(value: str) -> dict:
         raise argparse.ArgumentTypeError(str(exc)) from exc
 
 
+def parse_date_arg(value: str, *, end_of_day: bool = False) -> datetime:
+    text = value.strip()
+    try:
+        if not re.fullmatch(r'[0-9]{4}([-/])[0-9]{2}\1[0-9]{2}(?:[ T][0-9]{2}:[0-9]{2}(?::[0-9]{2})?)?', text):
+            raise ValueError
+        local = datetime.fromisoformat(text.replace('/', '-'))
+        if end_of_day and len(text) == 10:
+            local = local.replace(hour=23, minute=59, second=59)
+        # Naive input is in the host's local zone; convert using the date's offset.
+        return local.astimezone(timezone.utc)
+    except (ValueError, OverflowError, OSError) as exc:
+        raise argparse.ArgumentTypeError('期望有效的本地日期或时间，例如 2026-09-01 或 "2026-09-01 12:30"') from exc
+
+
 def build_parser():
     """构建命令行解析器，使用子命令简化分支判断。"""
 
@@ -48,6 +64,10 @@ def build_parser():
                                  default=None)
     download_parser.add_argument('--range', type=parse_range_arg, default='>0',
                                  help='消息 ID 范围：>N、<N、N（或 =N）、A..B（含两端）、N,M；默认 >0')
+    download_parser.add_argument('--since', type=parse_date_arg, metavar='日期或时间',
+                                 help='仅下载此时及之后发送的消息；仅填日期时从本地 00:00:00 起')
+    download_parser.add_argument('--until', type=lambda value: parse_date_arg(value, end_of_day=True),
+                                 metavar='日期或时间', help='仅下载此时及之前发送的消息；仅填日期时到本地 23:59:59 止')
     download_parser.add_argument('--prefix', help='通配符，文件名前缀', default=None)
 
     upload_parser = subparsers.add_parser('upload', help='上传文件')
@@ -197,7 +217,8 @@ async def handle_download(client: TelegramClient, args):
     failed = False
     for cid in channels:
         try:
-            if not await down_group(client, cid, message_range, args.user, args.prefix):
+            if not await down_group(client, cid, message_range, args.user, args.prefix,
+                                    since=args.since, until=args.until):
                 failed = True
         except UserAbort:
             raise
@@ -258,6 +279,8 @@ def main():
     # ================= 参数解析 =================
     parser = build_parser()
     args = parser.parse_args()
+    if args.command == 'download' and args.since and args.until and args.since > args.until:
+        parser.error('--since 不能晚于 --until')
     if args.command == 'self-test':
         try:
             check_build_variant(args.variant)

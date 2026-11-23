@@ -103,16 +103,21 @@ def parse_message_range(value: str) -> dict:
         low, high = message_id(match[1], 0), message_id(match[2])
         if low > high:
             raise ValueError('区间下限不能大于上限')
-        # Telethon 的上下界均为开区间；0 表示不限制该端。
-        return {'min_id': max(0, low - 1), 'max_id': 0 if high == max_message_id else high + 1}
+        # Telethon 的上下界均为开区间；reverse=True 从最小 ID 开始分页。
+        return {'min_id': max(0, low - 1), 'max_id': 0 if high == max_message_id else high + 1, 'reverse': True}
     if match := re.fullmatch(r'([<>])([0-9]+)', value):
         if match[1] == '>':
-            return {'min_id': message_id(match[2], 0)}
-        return {'max_id': message_id(match[2])}
+            low = message_id(match[2], 0)
+            if low == max_message_id:
+                # 空区间；避免 Telethon 把下限加一后作为 int32 游标发送。
+                return {'min_id': low, 'max_id': low, 'reverse': True}
+            return {'min_id': low, 'reverse': True}
+        return {'max_id': message_id(match[2]), 'reverse': True}
     if match := re.fullmatch(r'=?([0-9]+)', value):
         return {'ids': message_id(match[1])}
     if re.fullmatch(r'[0-9]+(?:\s*,\s*[0-9]+)+', value):
-        return {'ids': [message_id(part) for part in value.split(',')], 'reverse': True}
+        # Telethon 按请求顺序取指定 ID；reverse=True 会反转列表，而不会排序。
+        return {'ids': sorted(message_id(part) for part in value.split(','))}
     raise ValueError('应为 >N、<N、N、=N、A..B 或逗号分隔的消息 ID')
 
 

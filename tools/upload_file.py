@@ -1,6 +1,7 @@
 import math
 import os
 import re
+import sys
 import traceback
 from asyncio import CancelledError
 from importlib.util import find_spec
@@ -11,6 +12,11 @@ from telethon.tl.types import DocumentAttributeVideo, PeerChannel
 
 from tools.tool import configure_ffmpeg, get_all_files, get_thumb, str2join, get_filetype, UserAbort
 from tools.tqdm import TqdmUpTo
+
+
+# Telegram 默认非 Premium 分片上限；单片最大 512 KiB。
+# https://core.telegram.org/api/config#upload-max-fileparts-default
+NON_PREMIUM_UPLOAD_LIMIT = 4_000 * 512 * 1024
 
 
 def get_video_attributes(file_path: str) -> DocumentAttributeVideo:
@@ -54,12 +60,29 @@ async def upload_file(client: TelegramClient, chat_id, path: str, del_after_uplo
         path_list = get_all_files(path)
     else:
         path_list.append(path)
+    premium = None
+    oversized_count = 0
     for file_path in path_list:
         if not os.path.exists(file_path):
             continue
         filename = os.path.basename(file_path)
         filename_without_ext = filename.rsplit('.', maxsplit=1)[0]
         file_size = os.path.getsize(file_path)
+
+        if file_size > NON_PREMIUM_UPLOAD_LIMIT:
+            if premium is None:
+                account = await client.get_me()
+                if account is None:
+                    raise UserAbort('无法确认当前登录账号，不能上传超过普通账号上限的文件')
+                premium = bool(account.premium and not account.bot)
+            if not premium:
+                reason = (f'拒绝上传 {filename}：文件大小 {file_size:,} 字节，超过非 Premium 账号的单文件上限 '
+                          f'{NON_PREMIUM_UPLOAD_LIMIT:,} 字节。请压缩、分割，或改用 Premium 账号。')
+                if not isDir:
+                    raise UserAbort(reason)
+                print(reason, file=sys.stderr)
+                oversized_count += 1
+                continue
 
         mime_type = get_filetype(file_path)
         is_video = mime_type.startswith('video/')
@@ -101,3 +124,5 @@ async def upload_file(client: TelegramClient, chat_id, path: str, del_after_uplo
                 print(f'上传出错，疑似文件损坏，跳过 {filename}\n{traceback.format_exc()}')
     if isDir and not os.listdir(path):
         os.rmdir(path)
+    if oversized_count:
+        raise UserAbort(f'本次上传有 {oversized_count} 个文件超过非 Premium 账号上限，已拒绝上传')
