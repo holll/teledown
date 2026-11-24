@@ -5,11 +5,13 @@ go 1.25.0
 require (
 	github.com/gotd/contrib v0.26.0
 	github.com/gotd/td v0.166.1
+	github.com/mattn/go-colorable v0.1.15
 	golang.org/x/net v0.57.0
 	golang.org/x/sys v0.47.0
 	golang.org/x/term v0.45.0
 	golang.org/x/text v0.40.0
 	modernc.org/sqlite v1.34.4
+	rsc.io/qr v0.2.0
 )
 
 require (
@@ -31,7 +33,6 @@ require (
 	github.com/gotd/neo v0.1.5 // indirect
 	github.com/hashicorp/golang-lru/v2 v2.0.7 // indirect
 	github.com/klauspost/compress v1.19.2 // indirect
-	github.com/mattn/go-colorable v0.1.15 // indirect
 	github.com/mattn/go-isatty v0.0.22 // indirect
 	github.com/ncruces/go-strftime v0.1.9 // indirect
 	github.com/ogen-go/ogen v1.23.0 // indirect
@@ -58,5 +59,4 @@ require (
 	modernc.org/memory v1.8.0 // indirect
 	modernc.org/strutil v1.2.0 // indirect
 	modernc.org/token v1.1.0 // indirect
-	rsc.io/qr v0.2.0 // indirect
 )

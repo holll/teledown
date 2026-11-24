@@ -12,8 +12,10 @@
 *.gotd.json
 *.peers.json
 
-# 配置
+# 本地配置和设备标识
 .env
+device.id
+.device.id-*
 
 # IDE 本地配置
 .idea/

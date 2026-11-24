@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -11,21 +12,26 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	contribauth "github.com/gotd/contrib/auth"
 	"github.com/gotd/contrib/auth/localization"
 	"github.com/gotd/contrib/auth/terminal"
+	"github.com/gotd/td/clock"
+	"github.com/gotd/td/session"
 	"github.com/gotd/td/telegram"
 	"github.com/gotd/td/telegram/auth"
+	"github.com/gotd/td/telegram/auth/qrlogin"
 	"github.com/gotd/td/telegram/dcs"
 	"github.com/gotd/td/tg"
+	"github.com/mattn/go-colorable"
 	"golang.org/x/net/proxy"
 	"golang.org/x/term"
 	"golang.org/x/text/language"
 	"golang.org/x/text/message"
 
-	"teledown-go/tools"
+	"rsc.io/qr"
 )
 
 // 登录流程的重试参数：与 Telethon 的 send_code_request 重试策略一致（最多 3 次）。
@@ -34,19 +40,31 @@ const (
 	authRestartDelay = 2 * time.Second
 )
 
+// 商品名取自 Google Play 公开设备清单。保留顺序，避免既有 ID 换型号。
+var androidPhoneModels = [...]string{
+	"Google Pixel 7", "Google Pixel 7 Pro", "Google Pixel 8", "Google Pixel 8 Pro",
+	"Google Pixel 8a", "Google Pixel 9", "Google Pixel 9 Pro", "Google Pixel 9a",
+	"Samsung Galaxy S23", "Samsung Galaxy S23 Ultra", "Samsung Galaxy S24", "Samsung Galaxy S24 Ultra",
+	"Samsung Galaxy S25", "Samsung Galaxy S25 Ultra", "Xiaomi 14", "Xiaomi 15",
+}
+
+func androidDeviceModel(deviceID string) string {
+	// 设备 ID 只用于本地选型，不拼进上报的型号名称。
+	digest := sha256.Sum256([]byte(deviceID))
+	return androidPhoneModels[int(digest[0])%len(androidPhoneModels)]
+}
+
 // NewTelegramClient 构建客户端：会话落盘、可选 SOCKS5 代理、开启 CDN 下载流程。
-//
-// store 是独立的 Go SQLite 会话库（gotd 会话数据及 peer 缓存），由调用方
-// 打开并负责关闭：下载/上传解析 peer 时还要用它当 peers.Storage。
 //
 // proxyOverride 非空时优先于 .env 中的 proxy，格式与 Python 版一致：
 //
 //	socks5://user:pass@host:port
 //	user:pass@host:port
 //	host:port
-func NewTelegramClient(cfg *Config, proxyOverride string, store *tools.SessionStore) (*telegram.Client, error) {
+func NewTelegramClient(cfg *Config, proxyOverride, deviceID string, store session.Storage, updates telegram.UpdateHandler) (*telegram.Client, error) {
 	opts := telegram.Options{
 		SessionStorage: store,
+		UpdateHandler:  updates,
 		// 只有用户账号开启 CDN 重定向流程：服务端对 bot 账号限制 upload.getCdnFile，
 		// 一旦被重定向，bot 既无法从 CDN 取数也无法回退，等于把「可能能下」变成「必定失败」。
 		// 因此 bot_token 登录时显式关闭，继续走主 DC。
@@ -54,6 +72,10 @@ func NewTelegramClient(cfg *Config, proxyOverride string, store *tools.SessionSt
 		// 自动消化 FLOOD_WAIT：gotd 默认不处理，会把 420 错误直接抛出。
 		Middlewares: []telegram.Middleware{&floodWaitMiddleware{}},
 	}
+
+	// 仅设置设备显示资料，继续使用配置中的应用凭据，不冒充 Telegram 官方客户端。
+	opts.Device.DeviceModel = androidDeviceModel(deviceID)
+	opts.Device.SystemVersion = "Android (simulated)"
 
 	proxyURL := proxyOverride
 	if proxyURL == "" {
@@ -175,6 +197,192 @@ func Authorize(ctx context.Context, client *telegram.Client, cfg *Config) error 
 	return fmt.Errorf("登录失败: %w", lastErr)
 }
 
+type qrServerClock struct {
+	clock.Clock
+	offset func() time.Duration
+}
+
+func (c qrServerClock) Now() time.Time {
+	// gotd 将剩余时间向下取整到秒，留一秒余量避免在到期前刷新。
+	return c.Clock.Now().Add(c.offset() - time.Second)
+}
+
+func watchQRLogin(dispatcher interface{ OnLoginToken(tg.LoginTokenHandler) }, out io.Writer) qrlogin.LoggedIn {
+	loggedIn := make(chan struct{}, 1)
+	var once sync.Once
+	dispatcher.OnLoginToken(func(context.Context, tg.Entities, *tg.UpdateLoginToken) error {
+		once.Do(func() {
+			fmt.Fprintln(out, "收到 Telegram 登录状态更新，正在完成授权…")
+			loggedIn <- struct{}{}
+		})
+		return nil
+	})
+	return loggedIn
+}
+
+func distinctLoginQR(out io.Writer, show func(context.Context, qrlogin.Token) error) func(context.Context, qrlogin.Token) error {
+	var lastToken string
+	var lastExpiry time.Time
+	var reported bool
+	return func(ctx context.Context, token qrlogin.Token) error {
+		value, expiry := token.String(), token.Expires()
+		if value == lastToken && expiry.Equal(lastExpiry) {
+			if !reported {
+				fmt.Fprintln(out, "刷新后仍未取得授权结果，二维码未变。")
+				reported = true
+			}
+			return nil
+		}
+		if err := show(ctx, token); err != nil {
+			return err
+		}
+		lastToken, lastExpiry, reported = value, expiry, false
+		return nil
+	}
+}
+
+func authorizeQR(ctx context.Context, client *telegram.Client, cfg *Config, loggedIn qrlogin.LoggedIn) error {
+	login := qrlogin.NewQR(client.API(), cfg.APIID, cfg.APIHash, qrlogin.Options{
+		Clock: qrServerClock{Clock: clock.System, offset: client.ServerTimeOffset},
+		Migrate: func(ctx context.Context, dc int) error {
+			fmt.Fprintf(os.Stderr, "正在切换到数据中心 DC %d 完成授权…\n", dc)
+			return client.MigrateTo(ctx, dc)
+		},
+		Password: func(ctx context.Context) (string, error) {
+			fmt.Fprintln(os.Stderr, "Telegram 要求完成两步验证。")
+			if cfg.Password != "" {
+				return cfg.Password, ctx.Err()
+			}
+			return readQRPassword(ctx)
+		},
+	})
+	_, err := login.Auth(ctx, loggedIn, distinctLoginQR(os.Stderr, func(_ context.Context, token qrlogin.Token) error {
+		width, _, err := term.GetSize(int(os.Stderr.Fd()))
+		if err != nil {
+			return errors.New("扫码登录需要直接在终端中运行，不要重定向 stderr")
+		}
+		return showLoginQR(colorable.NewColorableStderr(), token, width)
+	}))
+	if tg.IsPasswordHashInvalid(err) {
+		return fmt.Errorf("两步验证密码不正确：请检查 .env 里的 password（%w）", err)
+	}
+	if err != nil {
+		return fmt.Errorf("扫码登录失败: %w", err)
+	}
+	return nil
+}
+
+func readQRPassword(ctx context.Context) (password string, err error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	fd := int(os.Stdin.Fd())
+	if !term.IsTerminal(fd) {
+		return "", errors.New("扫码后的两步验证需要直接在终端输入密码，不支持重定向 stdin")
+	}
+	state, err := term.MakeRaw(fd)
+	if err != nil {
+		return "", fmt.Errorf("准备不回显的密码输入: %w", err)
+	}
+	defer func() {
+		err = errors.Join(err, term.Restore(fd, state))
+	}()
+
+	terminal := term.NewTerminal(struct {
+		io.Reader
+		io.Writer
+	}{qrPasswordReader{ctx: ctx, input: os.Stdin}, colorable.NewColorableStderr()}, "")
+	password, err = terminal.ReadPassword("该账号启用了两步验证，请输入密码（不回显）: ")
+	if errors.Is(err, io.EOF) {
+		return "", errInterrupted
+	}
+	if ctx.Err() != nil {
+		return "", ctx.Err()
+	}
+	return password, err
+}
+
+type qrPasswordReader struct {
+	ctx   context.Context
+	input io.Reader
+}
+
+func (r qrPasswordReader) Read(p []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	// 取消时系统读可能仍阻塞，使用独立缓冲区；终端状态由调用方恢复。
+	type result struct {
+		n   int
+		err error
+	}
+	buf := make([]byte, len(p))
+	done := make(chan result, 1)
+	go func() {
+		n, err := r.input.Read(buf)
+		done <- result{n, err}
+	}()
+	select {
+	case <-r.ctx.Done():
+		return 0, r.ctx.Err()
+	case res := <-done:
+		copy(p, buf[:res.n])
+		return res.n, res.err
+	}
+}
+
+func saveQRSession(ctx context.Context, expectedPhone string, user *tg.User, pending, store session.Storage) error {
+	phone := strings.TrimPrefix(expectedPhone, "+")
+	if user.Bot || phone == "" || strings.TrimPrefix(user.Phone, "+") != phone {
+		return errors.New("登录账号与 .env 中的 phone 不一致或无法核实，未保存会话；请确认手机上的当前账号")
+	}
+	payload, err := pending.LoadSession(ctx)
+	if err != nil {
+		return fmt.Errorf("读取扫码会话失败: %w", err)
+	}
+	if err := store.StoreSession(ctx, payload); err != nil {
+		return fmt.Errorf("保存扫码会话失败: %w", err)
+	}
+	return nil
+}
+
+func loginQRURL(token qrlogin.Token) string {
+	// Telethon 生成的扫码链接使用不带尾部填充的 Base64URL。
+	return strings.TrimRight(token.URL(), "=")
+}
+
+func showLoginQR(w io.Writer, token qrlogin.Token, width int) error {
+	code, err := qr.Encode(loginQRURL(token), qr.M)
+	if err != nil {
+		return fmt.Errorf("生成登录二维码失败: %w", err)
+	}
+	const margin = 4
+	size := code.Size + 2*margin
+	if width <= size {
+		return fmt.Errorf("终端太窄，扫码登录需要至少 %d 列；请拉宽窗口后重试", size+1)
+	}
+	var out strings.Builder
+	fmt.Fprintf(&out, "\n在已登录的手机 Telegram 中打开「设置 → 设备 → 连接桌面设备」，扫描最新二维码（%s 到期）。不要分享二维码。\n",
+		token.Expires().Local().Format("15:04:05"))
+	glyphs := [...]rune{' ', '▀', '▄', '█'}
+	for y := -margin; y < code.Size+margin; y += 2 {
+		out.WriteString("\x1b[30;107m")
+		for x := -margin; x < code.Size+margin; x++ {
+			var pixel int
+			if code.Black(x, y) {
+				pixel |= 1
+			}
+			if code.Black(x, y+1) {
+				pixel |= 2
+			}
+			out.WriteRune(glyphs[pixel])
+		}
+		out.WriteString("\x1b[0m\n")
+	}
+	_, err = io.WriteString(w, out.String())
+	return err
+}
+
 // configCredentials 提供认证流程里的手机号与两步验证密码。
 // 交互部分（验证码读取、位数校验、条款与注册流程）由 contrib/auth/terminal 负责。
 type configCredentials struct {
@@ -241,6 +449,7 @@ func authFlow(cfg *Config) auth.Flow {
 		if err := ctx.Err(); err != nil {
 			return "", err
 		}
+		printLoginCodeDelivery(os.Stderr, sent)
 		value, err := termAuth.Code(ctx, sent)
 		if ctx.Err() != nil {
 			return "", ctx.Err()
@@ -249,6 +458,35 @@ func authFlow(cfg *Config) auth.Flow {
 	})
 	ask := contribauth.BuildAsk(code, contribauth.NoSignUp())
 	return auth.NewFlow(contribauth.Build(configCredentials{cfg: cfg, readPassword: readPassword}, ask), auth.SendCodeOptions{})
+}
+
+func printLoginCodeDelivery(w io.Writer, sent *tg.AuthSentCode) {
+	// 只输出固定类型名和非敏感元数据，不打印 RPC 对象或投递地址。
+	channel := sent.Type.TypeName()
+	switch sent.Type.(type) {
+	case *tg.AuthSentCodeTypeApp:
+		channel += "，请查看同一账号已登录客户端中的官方「Telegram」对话（不是短信）"
+	case *tg.AuthSentCodeTypeSMS, *tg.AuthSentCodeTypeSMSWord, *tg.AuthSentCodeTypeSMSPhrase:
+		channel += "，请查看手机短信"
+	case *tg.AuthSentCodeTypeEmailCode:
+		channel += "，请查看登录邮箱及垃圾邮件文件夹"
+	case *tg.AuthSentCodeTypeCall, *tg.AuthSentCodeTypeFlashCall, *tg.AuthSentCodeTypeMissedCall:
+		channel += "，请留意电话或未接来电"
+	case *tg.AuthSentCodeTypeSetUpEmailRequired:
+		channel += "，服务端要求先设置登录邮箱"
+	}
+	fmt.Fprintf(w, "Telegram 返回的验证码投递类型：%s\n", channel)
+	if code, ok := sent.Type.(interface{ GetLength() int }); ok && code.GetLength() > 0 {
+		fmt.Fprintf(w, "验证码长度：%d\n", code.GetLength())
+	}
+	if next, ok := sent.GetNextType(); ok {
+		fmt.Fprintf(w, "服务端提供的重发渠道：%s（本工具不会自动重发）\n", next.TypeName())
+	} else {
+		fmt.Fprintln(w, "服务端未提供重发渠道。")
+	}
+	if timeout, ok := sent.GetTimeout(); ok {
+		fmt.Fprintf(w, "服务端等待时间：%d 秒（不是终端输入倒计时）\n", timeout)
+	}
 }
 
 // isSignUpRequired 判断错误链里是否有「服务端要求注册」。

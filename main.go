@@ -12,14 +12,21 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/gotd/td/session"
 	"github.com/gotd/td/telegram"
+	"github.com/gotd/td/telegram/auth"
+	"github.com/gotd/td/telegram/auth/qrlogin"
+	"github.com/gotd/td/tg"
 
 	"teledown-go/tools"
 )
 
 // infoTimeout 限制 info 命令的连接与登录耗时：代理不可达时 gotd 会持续重连，
 // 不加时限会让「快速自检」变成无限等待。
-const infoTimeout = 60 * time.Second
+const (
+	infoTimeout = 60 * time.Second
+	qrTimeout   = 3 * time.Minute
+)
 
 var errInterrupted = errors.New("收到退出信号，操作已中止。")
 
@@ -66,7 +73,7 @@ func usage() {
 	fmt.Fprint(os.Stderr, `teledown-go - 基于 gotd/td 的 Telegram 下载上传工具
 
 用法:
-  teledown-go info                                 查看当前账号登录状态
+  teledown-go info [--qr]                          查看账号信息，可用手机扫码登录
   teledown-go download -id <频道ID|@用户名> [--range <范围>] [--prefix <通配符>] [--since <日期>] [--until <日期>]
   teledown-go upload   -id <频道ID|@用户名|me> -path <文件或目录> [-dau Y] [-at <标签>]
 
@@ -115,18 +122,23 @@ func parseCommandFlags(fs *flag.FlagSet, args []string) error {
 func runInfoCommand(args []string) error {
 	fs := flag.NewFlagSet("info", flag.ContinueOnError)
 	config, proxyAddr := commonFlags(fs)
+	scanQR := fs.Bool("qr", false, "在终端显示登录二维码（仅用户账号）")
 	if err := parseCommandFlags(fs, args); err != nil {
 		return err
 	}
 
-	// info 是「快速自检」，代理不可达时 gotd 会一直重连，必须加超时兜底
-	return withClient(*config, *proxyAddr, infoTimeout, func(ctx context.Context, client *telegram.Client, cfg *Config, _ *tools.SessionStore) error {
-		return showInfo(ctx, client, cfg)
+	// 保留快速自检的时限，扫码时给手机确认和两步验证留出时间。
+	timeout := infoTimeout
+	if *scanQR {
+		timeout = qrTimeout
+	}
+	return withClient(*config, *proxyAddr, timeout, *scanQR, func(ctx context.Context, client *telegram.Client, cfg *Config, _ *tools.SessionStore) error {
+		return showInfo(ctx, client, cfg, *scanQR)
 	})
 }
 
 // showInfo 打印账号信息，对应 Python 版 main.py 的 show_info。
-func showInfo(ctx context.Context, client *telegram.Client, cfg *Config) error {
+func showInfo(ctx context.Context, client *telegram.Client, cfg *Config, scanQR bool) error {
 	me, err := client.Self(ctx)
 	if err != nil {
 		return fmt.Errorf("获取账号信息失败: %w", err)
@@ -135,6 +147,8 @@ func showInfo(ctx context.Context, client *telegram.Client, cfg *Config) error {
 	loginMethod := "手机号 " + cfg.Phone
 	if cfg.BotToken != "" {
 		loginMethod = "机器人 Token"
+	} else if scanQR {
+		loginMethod = "扫码模式（有会话时直接复用）"
 	}
 
 	name := me.Username
@@ -200,7 +214,7 @@ func runDownloadCommand(args []string) error {
 		stats = new(tools.TransferStats)
 		defer stats.Report(os.Stderr)
 	}
-	return withClient(*config, *proxyAddr, 0, func(ctx context.Context, client *telegram.Client, cfg *Config, store *tools.SessionStore) error {
+	return withClient(*config, *proxyAddr, 0, false, func(ctx context.Context, client *telegram.Client, cfg *Config, store *tools.SessionStore) error {
 		ctx = tools.WithTransferStats(ctx, stats)
 		workerLimit, profileErr := downloadThreadLimit(ctx, *threads, threadsExplicit, cfg.BotToken != "", func(ctx context.Context) (bool, error) {
 			me, err := client.Self(ctx)
@@ -269,7 +283,7 @@ func runUploadCommand(args []string) error {
 		stats = new(tools.TransferStats)
 		defer stats.Report(os.Stderr)
 	}
-	return withClient(*config, *proxyAddr, 0, func(ctx context.Context, client *telegram.Client, cfg *Config, store *tools.SessionStore) error {
+	return withClient(*config, *proxyAddr, 0, false, func(ctx context.Context, client *telegram.Client, cfg *Config, store *tools.SessionStore) error {
 		ctx = tools.WithTransferStats(ctx, stats)
 		peer, err := tools.NewPeerManager(client.API(), store).Resolve(ctx, *channelID)
 		if err != nil {
@@ -294,6 +308,7 @@ func runUploadCommand(args []string) error {
 func withClient(
 	configPath, proxyAddr string,
 	timeout time.Duration,
+	scanQR bool,
 	fn func(ctx context.Context, client *telegram.Client, cfg *Config, store *tools.SessionStore) error,
 ) error {
 	cfg, err := LoadConfig(configPath)
@@ -301,16 +316,18 @@ func withClient(
 		return err
 	}
 
+	if scanQR && cfg.BotToken != "" {
+		return errors.New("--qr 仅支持用户账号，请配置 phone；机器人请使用普通 info")
+	}
+	deviceID, err := loadDeviceID(configPath)
+	if err != nil {
+		return fmt.Errorf("初始化设备标识失败: %w", err)
+	}
 	store, err := tools.OpenSessionStore(cfg.SessionPath())
 	if err != nil {
 		return err
 	}
 	defer func() { _ = store.Close() }()
-
-	client, err := NewTelegramClient(cfg, proxyAddr, store)
-	if err != nil {
-		return err
-	}
 
 	signalCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -324,15 +341,68 @@ func withClient(
 		defer cancel()
 	}
 
-	err = client.Run(ctx, func(ctx context.Context) error {
-		if err := Authorize(ctx, client, cfg); err != nil {
+	unauthorized := errors.New("现有会话尚未授权")
+	run := func(storage session.Storage, probe bool) error {
+		var updates telegram.UpdateHandler
+		var loggedIn qrlogin.LoggedIn
+		if scanQR && !probe {
+			dispatcher := tg.NewUpdateDispatcher()
+			loggedIn = watchQRLogin(dispatcher, os.Stderr)
+			updates = dispatcher
+		}
+		client, err := NewTelegramClient(cfg, proxyAddr, deviceID, storage, updates)
+		if err != nil {
 			return err
 		}
-		return fn(ctx, client, cfg, store)
-	})
+		return client.Run(ctx, func(ctx context.Context) error {
+			if scanQR {
+				if !probe {
+					if err := authorizeQR(ctx, client, cfg, loggedIn); err != nil {
+						return err
+					}
+					fmt.Fprintln(os.Stderr, "Telegram 已授权，正在核验登录账号…")
+				}
+				user, err := client.Self(ctx)
+				if probe && auth.IsUnauthorized(err) {
+					return unauthorized
+				}
+				if err != nil {
+					return fmt.Errorf("核验扫码账号失败: %w", err)
+				}
+				if err := saveQRSession(ctx, cfg.Phone, user, storage, store); err != nil {
+					return err
+				}
+			} else if err := Authorize(ctx, client, cfg); err != nil {
+				return err
+			}
+			return fn(ctx, client, cfg, store)
+		})
+	}
+	if !scanQR {
+		err = run(store, false)
+	} else {
+		payload, loadErr := store.LoadSession(ctx)
+		if loadErr != nil && !errors.Is(loadErr, session.ErrNotFound) {
+			return fmt.Errorf("读取现有会话失败: %w", loadErr)
+		}
+		if len(payload) > 0 {
+			existing := new(session.StorageMemory)
+			if err := existing.StoreSession(ctx, payload); err != nil {
+				return err
+			}
+			err = run(existing, true)
+		}
+		if len(payload) == 0 || errors.Is(err, unauthorized) {
+			// 使用全新的授权密钥；误扫的账号不能给磁盘上的旧密钥授权。
+			err = run(new(session.StorageMemory), false)
+		}
+	}
 	// gotd 可能把 context.Canceled 当成正常退出并返回 nil。
 	if signalCtx.Err() != nil && (err == nil || errors.Is(err, context.Canceled)) {
 		return errInterrupted
+	}
+	if scanQR && errors.Is(ctx.Err(), context.DeadlineExceeded) && (err == nil || errors.Is(err, context.DeadlineExceeded)) {
+		return fmt.Errorf("扫码登录超时（%s），请确认手机已扫码并完成验证，或检查网络与代理: %w", timeout, ctx.Err())
 	}
 	if timeout > 0 && errors.Is(ctx.Err(), context.DeadlineExceeded) && errors.Is(err, context.DeadlineExceeded) {
 		return fmt.Errorf("操作超时（%s），请检查网络与代理是否可用: %w", timeout, err)

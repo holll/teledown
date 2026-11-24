@@ -1,8 +1,12 @@
 package main
 
 import (
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"unicode"
@@ -55,6 +59,41 @@ func LoadConfig(path string) (*Config, error) {
 		return nil, fmt.Errorf("请在 %s 中填写 phone 或 bot_token", path)
 	}
 	return cfg, nil
+}
+
+// loadDeviceID 为同一配置目录内的客户端复用一个随机设备标识。
+func loadDeviceID(configPath string) (string, error) {
+	dir := filepath.Dir(configPath)
+	path := filepath.Join(dir, "device.id")
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		var random [16]byte
+		if _, err := rand.Read(random[:]); err != nil {
+			return "", err
+		}
+		tmp, createErr := os.CreateTemp(dir, ".device.id-*")
+		if createErr != nil {
+			return "", createErr
+		}
+		defer os.Remove(tmp.Name())
+		_, writeErr := tmp.WriteString(hex.EncodeToString(random[:]) + "\n")
+		if err := errors.Join(writeErr, tmp.Close()); err != nil {
+			return "", err
+		}
+		// 不覆盖其他进程刚写好的标识，也不让其他进程读到半写文件。
+		if err := os.Link(tmp.Name(), path); err != nil && !errors.Is(err, os.ErrExist) {
+			return "", err
+		}
+		data, err = os.ReadFile(path)
+	}
+	if err != nil {
+		return "", err
+	}
+	id := strings.TrimSpace(string(data))
+	if _, err := hex.DecodeString(id); len(id) != 32 || err != nil {
+		return "", fmt.Errorf("%s 格式无效：应为 32 位十六进制字符，未覆盖原文件", path)
+	}
+	return strings.ToLower(id), nil
 }
 
 // SessionName 计算会话文件名用的稳定账号标识（md5 前 16 位）。
