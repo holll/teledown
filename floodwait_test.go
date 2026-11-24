@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -10,6 +11,8 @@ import (
 	"testing"
 	"testing/synctest"
 	"time"
+
+	"teledown-go/tools"
 
 	"github.com/gotd/td/bin"
 	"github.com/gotd/td/tg"
@@ -56,6 +59,40 @@ func TestFloodLogInvokerPassesRetryableWait(t *testing.T) {
 	}
 }
 
+func TestFloodLogInvokerIdentifiesFreeAccountTransferWait(t *testing.T) {
+	inv := &floodLogInvoker{middleware: &floodWaitMiddleware{}, next: &scriptedInvoker{errs: []error{tgerr.New(420, "FLOOD_PREMIUM_WAIT_20")}}}
+	out := captureStdout(t, func() {
+		if _, ok := tgerr.AsFloodWait(inv.Invoke(t.Context(), &tg.UploadGetFileRequest{}, nil)); !ok {
+			t.Error("Premium wait should still be passed to the waiter")
+		}
+	})
+	if !strings.Contains(out, "FLOOD_PREMIUM_WAIT") || !strings.Contains(out, "免费账号") {
+		t.Fatalf("missing free-account rate-limit diagnostic: %q", out)
+	}
+}
+
+func TestTransferStatsReportOnlyAcceptedWaits(t *testing.T) {
+	stats := new(tools.TransferStats)
+	ctx := tools.WithTransferStats(t.Context(), stats)
+	m := new(floodWaitMiddleware)
+	captureStdout(t, func() {
+		inv := &floodLogInvoker{middleware: m, next: &scriptedInvoker{errs: []error{tgerr.New(420, "SLOWMODE_WAIT_20")}}}
+		_ = inv.Invoke(ctx, &tg.MessagesSendMediaRequest{}, nil)
+		inv = &floodLogInvoker{middleware: m, next: &scriptedInvoker{errs: []error{floodWait(601)}}}
+		_ = inv.Invoke(ctx, &tg.UploadGetFileRequest{}, nil)
+	})
+	var report bytes.Buffer
+	stats.Report(&report)
+	for _, want := range []string{"消息提交限流：1 次，20s", "下载字节限流：0 次，0s"} {
+		if !strings.Contains(report.String(), want) {
+			t.Errorf("report missing %q: %s", want, report.String())
+		}
+	}
+	if _, ok := m.cooldown[floodCooldownKind(&tg.MessagesSendMediaRequest{})]; ok {
+		t.Fatal("chat-specific slow mode should not set a shared cooldown")
+	}
+}
+
 // 等待时长超过上限：必须返回一个**不再被识别为限流**的错误，否则 SimpleWaiter
 // 会一直等下去（上限形同虚设）。
 func TestFloodLogInvokerStopsOnTooLongWait(t *testing.T) {
@@ -65,8 +102,8 @@ func TestFloodLogInvokerStopsOnTooLongWait(t *testing.T) {
 	if _, isFlood := tgerr.AsFloodWait(err); isFlood {
 		t.Fatal("超长等待必须返回非限流错误，否则会被无限重试")
 	}
-	if !strings.Contains(err.Error(), "自动等待上限") {
-		t.Errorf("错误提示不明确: %v", err)
+	if !errors.Is(err, tools.ErrTransferWaitLimit) || !strings.Contains(err.Error(), "自动等待上限") {
+		t.Errorf("错误提示或终止标记不明确: %v", err)
 	}
 }
 
@@ -154,6 +191,35 @@ func TestFloodWaitMiddlewareSharesCooldownByRPCType(t *testing.T) {
 		}
 		if err := <-done; err != nil || first.calls != 2 {
 			t.Fatalf("原请求应独立重试成功：err=%v, calls=%d", err, first.calls)
+		}
+	})
+}
+
+func TestFloodWaitMiddlewareSharesPremiumCooldownBetweenUploadPartSizes(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		m := &floodWaitMiddleware{}
+		start := time.Now()
+		first := &scriptedInvoker{errs: []error{tgerr.New(420, "FLOOD_PREMIUM_WAIT_5"), nil}}
+		done := make(chan error, 1)
+		go func() { done <- m.Handle(first)(t.Context(), &tg.UploadSaveBigFilePartRequest{}, nil) }()
+		synctest.Wait()
+		if first.calls != 1 {
+			t.Fatalf("large part calls = %d, want 1", first.calls)
+		}
+
+		next := &scriptedInvoker{}
+		invoke := m.Handle(next)
+		if err := invoke(t.Context(), &tg.MessagesSendMediaRequest{}, nil); err != nil || time.Since(start) != 0 {
+			t.Fatalf("message submission must not inherit byte upload cooldown: %v", err)
+		}
+		if err := invoke(t.Context(), &tg.UploadGetFileRequest{}, nil); err != nil || time.Since(start) != 0 {
+			t.Fatalf("downloads must not inherit byte upload cooldown: %v", err)
+		}
+		if err := invoke(t.Context(), &tg.UploadSaveFilePartRequest{}, nil); err != nil || time.Since(start) != 5*time.Second {
+			t.Fatalf("small part must wait until the large part cooldown ends: %v (elapsed %s)", err, time.Since(start))
+		}
+		if err := <-done; err != nil || first.calls != 2 {
+			t.Fatalf("large part retry: err=%v, calls=%d", err, first.calls)
 		}
 	})
 }

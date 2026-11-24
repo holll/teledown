@@ -36,7 +36,7 @@ type PeerManager struct {
 	storage *SessionStore
 }
 
-// NewPeerManager 构建解析器，peers.Storage 用会话库的 entities 表（见 sessionstore.go）。
+// NewPeerManager 构建解析器，peers.Storage 用会话库的 peer 缓存（见 sessionstore.go）。
 func NewPeerManager(api *tg.Client, storage *SessionStore) *PeerManager {
 	return &PeerManager{
 		// 不设置 Cache：标题等展示信息由 channels.getChannels 的返回值提供，

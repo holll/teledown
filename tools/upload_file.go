@@ -36,14 +36,60 @@ type UploadOptions struct {
 	Premium     bool
 }
 
-// Telegram 普通账号最多上传 4000 个分片，每片最多 512 KiB。
-const nonPremiumUploadLimit = int64(4000) * uploader.MaximumPartSize
+const (
+	defaultUploadParts = 4000
+	premiumUploadParts = 8000
+)
 
-func checkUploadSize(size int64, premium bool) error {
-	if !premium && size > nonPremiumUploadLimit {
-		return fmt.Errorf("当前账号不是 Premium，文件大小 %d 字节超过单文件上限 %d 字节（2000 MiB）", size, nonPremiumUploadLimit)
+type uploadConfigClient interface {
+	HelpGetAppConfig(context.Context, int) (tg.HelpAppConfigClass, error)
+}
+
+func uploadPartsLimit(ctx context.Context, client uploadConfigClient, premium bool) int {
+	key, fallback := "upload_max_fileparts_default", defaultUploadParts
+	if premium {
+		key, fallback = "upload_max_fileparts_premium", premiumUploadParts
 	}
-	return nil
+	// 一次查询覆盖本批次；不让配置 RPC（如 bot 无权限或限流）卡住上传。
+	configCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	resp, err := client.HelpGetAppConfig(configCtx, 0)
+	config, ok := resp.(*tg.HelpAppConfig)
+	if err != nil || !ok || config == nil {
+		return fallback
+	}
+	obj, ok := config.Config.(*tg.JSONObject)
+	if !ok || obj == nil {
+		return fallback
+	}
+	for _, entry := range obj.Value {
+		if entry.Key != key {
+			continue
+		}
+		if n, ok := entry.Value.(*tg.JSONNumber); ok && n != nil && n.Value >= 1 && n.Value <= math.MaxInt32 && math.Trunc(n.Value) == n.Value {
+			return int(n.Value)
+		}
+		break
+	}
+	return fallback
+}
+
+func uploadPartSize(size int64, maxParts int, premium bool) (int, error) {
+	maxBytes := int64(maxParts) * uploader.MaximumPartSize
+	if size > maxBytes {
+		tier := "普通账号"
+		if premium {
+			tier = "Premium 账号"
+		}
+		return 0, fmt.Errorf("%s：文件大小 %d 字节超过单文件上限 %d 字节（最多 %d 片）", tier, size, maxBytes, maxParts)
+	}
+	// Keep gotd's 128 KiB baseline, but grow using the active tier's limit.
+	// Explicit WithPartSize makes the preflight and actual part count agree.
+	partSize := 128 * 1024
+	for size > int64(maxParts)*int64(partSize) {
+		partSize *= 2
+	}
+	return partSize, nil
 }
 
 type uploadPartRetryClient struct {
@@ -65,10 +111,22 @@ func retryUploadPart(ctx context.Context, send func() (bool, error)) (bool, erro
 			return false, err
 		}
 		ok, err := send()
-		// gotd 对已确认但未收到结果的请求返回包装过的 context.Canceled，
-		// 没有独立错误类型。这里只重发相同文件 ID、片号和内容，不重发媒体消息。
-		if attempt == maxRetries || !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "engine forcibly closed:") {
-			return ok, err
+		if err == nil && ok {
+			return true, nil
+		}
+		if ctx.Err() != nil {
+			return false, ctx.Err()
+		}
+		// gotd uses a wrapped context.Canceled for confirmed requests without a
+		// result on engine shutdown. Its upload loops also retry false ACKs
+		// indefinitely, so consume those here and return a terminal error at the cap.
+		if err == nil {
+			err = errors.New("Telegram 未确认保存该分片")
+		} else if !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "engine forcibly closed:") {
+			return false, err
+		}
+		if attempt == maxRetries {
+			return false, err
 		}
 		timer := time.NewTimer(time.Second << attempt)
 		select {
@@ -76,6 +134,7 @@ func retryUploadPart(ctx context.Context, send func() (bool, error)) (bool, erro
 			timer.Stop()
 			return false, ctx.Err()
 		case <-timer.C:
+			TransferStatsFrom(ctx).RecordUploadRetry()
 		}
 	}
 }
@@ -90,12 +149,13 @@ func Upload(ctx context.Context, api *tg.Client, peer *Peer, opt UploadOptions) 
 		return fmt.Errorf("路径 %s 下没有可上传的文件", opt.Path)
 	}
 
+	maxParts := uploadPartsLimit(ctx, api, opt.Premium)
 	var failed int
 	for _, path := range files {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if err := uploadOne(ctx, api, peer.Input, path, opt); err != nil {
+		if err := uploadOne(ctx, api, peer.Input, path, opt, maxParts); err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
@@ -120,7 +180,7 @@ func Upload(ctx context.Context, api *tg.Client, peer *Peer, opt UploadOptions) 
 	return nil
 }
 
-func uploadOne(ctx context.Context, api *tg.Client, peer tg.InputPeerClass, path string, opt UploadOptions) error {
+func uploadOne(ctx context.Context, api *tg.Client, peer tg.InputPeerClass, path string, opt UploadOptions, maxParts int) error {
 	path, err := filepath.Abs(path)
 	if err != nil {
 		return fmt.Errorf("获取上传文件的绝对路径: %w", err)
@@ -132,7 +192,8 @@ func uploadOne(ctx context.Context, api *tg.Client, peer tg.InputPeerClass, path
 	if !info.Mode().IsRegular() {
 		return fmt.Errorf("不上传非普通文件: %s", path)
 	}
-	if err := checkUploadSize(info.Size(), opt.Premium); err != nil {
+	partSize, err := uploadPartSize(info.Size(), maxParts, opt.Premium)
+	if err != nil {
 		return err
 	}
 	name := filepath.Base(path)
@@ -177,12 +238,10 @@ func uploadOne(ctx context.Context, api *tg.Client, peer tg.InputPeerClass, path
 	}()
 
 	partClient := uploadPartRetryClient{Client: api}
-	up := uploader.NewUploader(partClient).WithThreads(opt.Threads).WithProgress(bar)
-	// 用 FromPath 而不是自己 os.Open：它内部负责关闭句柄，
-	// 而 Windows 上句柄未关闭时 os.Remove 一定会失败（-dau Y 会删不掉源文件）。
-	uploaded, err := up.FromPath(ctx, path)
+	up := uploader.NewUploader(partClient).WithThreads(opt.Threads).WithProgress(bar).WithPartSize(partSize)
+	uploaded, err := uploadFileBytes(ctx, up, path, info)
 	if err != nil {
-		return fmt.Errorf("上传失败: %w", err)
+		return fmt.Errorf("上传文件分片失败: %w", err)
 	}
 
 	var thumbInput tg.InputFileClass
@@ -213,8 +272,10 @@ func uploadOne(ctx context.Context, api *tg.Client, peer tg.InputPeerClass, path
 	if thumbInput != nil {
 		doc = doc.Thumb(thumbInput)
 	}
+	// 文件分片已上传；提交失败直接返回，不重传文件，也不生成新随机 ID 重发消息。
 	if _, err := message.NewSender(api).To(peer).Media(ctx, doc); err != nil {
-		return fmt.Errorf("发送媒体消息失败: %w", err)
+		TransferStatsFrom(ctx).RecordMediaSendFailure()
+		return fmt.Errorf("文件分片已上传，但发送媒体消息失败: %w", err)
 	}
 
 	// 附件已经发出去，进度条到此收尾；后面删源文件失败不属于上传失败
@@ -226,6 +287,29 @@ func uploadOne(ctx context.Context, api *tg.Client, peer tg.InputPeerClass, path
 		}
 	}
 	return nil
+}
+
+func uploadFileBytes(ctx context.Context, up *uploader.Uploader, path string, expected fs.FileInfo) (uploaded tg.InputFileClass, err error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { err = errors.Join(err, f.Close()) }()
+
+	info, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() || !os.SameFile(expected, info) || expected.Size() != info.Size() {
+		return nil, errors.New("待上传文件在预检后发生变化，请重新执行")
+	}
+	// Use exactly the size checked above instead of recomputing it in FromPath.
+	reader := &io.LimitedReader{R: f, N: info.Size()}
+	uploaded, err = up.Upload(ctx, uploader.NewUpload(info.Name(), reader, info.Size()))
+	if err == nil && reader.N != 0 {
+		return nil, fmt.Errorf("待上传文件提前结束，少读取 %d 字节", reader.N)
+	}
+	return uploaded, err
 }
 
 // collectFiles 收集待上传文件，目录递归收集并按路径排序（与 Python 版一致）。

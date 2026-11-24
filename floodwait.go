@@ -7,6 +7,8 @@ import (
 	"sync"
 	"time"
 
+	"teledown-go/tools"
+
 	"github.com/gotd/contrib/middleware/floodwait"
 	"github.com/gotd/td/bin"
 	"github.com/gotd/td/telegram"
@@ -66,8 +68,8 @@ func (m *floodWaitMiddleware) waitForCooldown(ctx context.Context, kind reflect.
 			return nil
 		}
 		if remaining > floodSleepThreshold {
-			return fmt.Errorf("同类请求仍在限流，需等待 %s（超过 %s 的自动等待上限），请稍后再试",
-				remaining.Round(time.Second), floodSleepThreshold)
+			return fmt.Errorf("同类请求仍在限流，需等待 %s（超过 %s 的自动等待上限），请稍后再试: %w",
+				remaining.Round(time.Second), floodSleepThreshold, tools.ErrTransferWaitLimit)
 		}
 		timer := time.NewTimer(remaining)
 		select {
@@ -105,8 +107,33 @@ type floodLogInvoker struct {
 	attempts   int
 }
 
+// 小文件、缩略图和大文件分片共用上传冷却；不要把发送消息的慢速模式
+// 和上传字节混在一起。这个分组是客户端策略，不代表服务端配额的计量范围。
+func floodCooldownKind(input bin.Encoder) reflect.Type {
+	switch input.(type) {
+	case *tg.UploadSaveFilePartRequest, *tg.UploadSaveBigFilePartRequest:
+		return reflect.TypeFor[*tg.UploadSaveFilePartRequest]()
+	default:
+		return reflect.TypeOf(input)
+	}
+}
+
+func transferWaitClass(input bin.Encoder) tools.TransferWaitClass {
+	switch input.(type) {
+	case *tg.UploadGetFileRequest, *tg.UploadGetFileHashesRequest, *tg.UploadGetCDNFileRequest,
+		*tg.UploadGetCDNFileHashesRequest, *tg.UploadReuploadCDNFileRequest:
+		return tools.WaitDownload
+	case *tg.UploadSaveFilePartRequest, *tg.UploadSaveBigFilePartRequest:
+		return tools.WaitUpload
+	case *tg.MessagesSendMediaRequest, *tg.MessagesSendMultiMediaRequest, *tg.MessagesUploadMediaRequest:
+		return tools.WaitSubmit
+	default:
+		return tools.WaitOther
+	}
+}
+
 func (i *floodLogInvoker) Invoke(ctx context.Context, input bin.Encoder, output bin.Decoder) error {
-	kind := reflect.TypeOf(input)
+	kind := floodCooldownKind(input)
 	if err := i.middleware.waitForCooldown(ctx, kind); err != nil {
 		return err
 	}
@@ -116,28 +143,46 @@ func (i *floodLogInvoker) Invoke(ctx context.Context, input bin.Encoder, output 
 	}
 
 	rpc, ok := tgerr.As(err)
-	if !ok || rpc.Code != 420 || !rpc.IsOneOf(tgerr.FloodWaitErrors...) {
+	if !ok {
 		return err
 	}
-	if kind != nil {
-		const maxSeconds = int64(1<<63-1) / int64(time.Second)
-		i.middleware.recordCooldown(kind, time.Duration(min(max(1, int64(rpc.Argument)), maxSeconds))*time.Second)
+	// Keep this classification in sync with contrib v0.26.0 SimpleWaiter.
+	// Only FLOOD_* rate limits share cooldowns across calls; slow mode and
+	// other operation-local waits must not stall unrelated traffic.
+	seconds := max(1, rpc.Argument)
+	switch {
+	case rpc.Code == 420 && rpc.IsOneOf(tgerr.FloodWaitErrors...):
+		if kind != nil {
+			const maxSeconds = int64(1<<63-1) / int64(time.Second)
+			i.middleware.recordCooldown(kind, time.Duration(min(int64(seconds), maxSeconds))*time.Second)
+		}
+	case rpc.Code == 420 && rpc.IsOneOf("SLOWMODE_WAIT", "2FA_CONFIRM_WAIT", "TAKEOUT_INIT_DELAY", "FLOOD_TEST_PHONE_WAIT"):
+	case rpc.Code == 420 && rpc.IsType("FLOOD_SKIP_FAILED_WAIT"),
+		rpc.Code == 500 && rpc.IsType("WORKER_BUSY_TOO_LONG_RETRY"):
+		seconds = 1
+	default:
+		return err
 	}
 	// 先比较秒数，避免转换成纳秒时溢出。
-	if rpc.Argument > int(floodSleepThreshold/time.Second) {
-		return fmt.Errorf("触发限流，需等待 %d 秒（超过 %s 的自动等待上限），请稍后再试：%v",
-			rpc.Argument, floodSleepThreshold, err)
+	if seconds > int(floodSleepThreshold/time.Second) {
+		return fmt.Errorf("触发限流，需等待 %d 秒（超过 %s 的自动等待上限），请稍后再试：%v: %w",
+			seconds, floodSleepThreshold, err, tools.ErrTransferWaitLimit)
 	}
-	wait := time.Duration(max(1, rpc.Argument)) * time.Second
+	wait := time.Duration(seconds) * time.Second
 
 	i.attempts++
 	attempt := i.attempts
 	if attempt > floodMaxRetries {
-		return fmt.Errorf("连续 %d 次被限流（每次都已等满服务端要求），仍未能通过，请稍后再试：%v",
-			floodMaxRetries, err)
+		return fmt.Errorf("连续 %d 次被限流（每次都已等满服务端要求），仍未能通过，请稍后再试：%v: %w",
+			floodMaxRetries, err, tools.ErrTransferWaitLimit)
 	}
 
-	fmt.Printf("触发限流，等待 %s 后自动重试（第 %d/%d 次）\n",
-		wait.Round(time.Second), attempt, floodMaxRetries)
+	tools.TransferStatsFrom(ctx).RecordFloodWait(transferWaitClass(input), wait)
+	detail := ""
+	if rpc.IsOneOf(tgerr.ErrPremiumFloodWait) {
+		detail = "（Telegram 返回 FLOOD_PREMIUM_WAIT，免费账号的传输速率限制）"
+	}
+	fmt.Printf("触发限流，等待 %s 后自动重试（第 %d/%d 次）%s\n",
+		wait.Round(time.Second), attempt, floodMaxRetries, detail)
 	return err
 }

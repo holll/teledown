@@ -75,7 +75,9 @@ func usage() {
   --proxy <地址>  SOCKS5 代理，格式 socks5://user:pass@host:port 或 host:port
 
 download / upload 额外参数:
-  -threads <n>  分片并发数，默认 4
+  -threads <n>  分片并发上限：下载默认 4，Premium 默认 8；上传默认 4
+  --transfer-stats  在 stderr 输出传输诊断
+  --resume          仅 download：启用完整文档的校验续传
 
 --range 支持的写法（按消息 ID 从小到大下载）:
   >100        消息 ID 大于 100
@@ -165,9 +167,11 @@ func runDownloadCommand(args []string) error {
 	fs := flag.NewFlagSet("download", flag.ContinueOnError)
 	config, proxyAddr := commonFlags(fs)
 	threads := fs.Int("threads", tools.DefaultThreads, "分片并发数")
+	transferStats := fs.Bool("transfer-stats", false, "在 stderr 输出传输诊断")
 	channelID := fs.String("id", "", "频道 ID 或 @用户名")
 	rangeArg := fs.String("range", ">0", "消息范围")
 	prefix := fs.String("prefix", "", "文件名通配符，; 分隔多条")
+	resume := fs.Bool("resume", false, "启用完整文档的校验续传")
 	since := fs.String("since", "", "只下载该日期（含）之后的消息，如 2026-09-01")
 	until := fs.String("until", "", "只下载该日期（含）之前的消息")
 	if err := parseCommandFlags(fs, args); err != nil {
@@ -189,7 +193,28 @@ func runDownloadCommand(args []string) error {
 		return err
 	}
 
+	threadsExplicit := false
+	fs.Visit(func(f *flag.Flag) { threadsExplicit = threadsExplicit || f.Name == "threads" })
+	var stats *tools.TransferStats
+	if *transferStats {
+		stats = new(tools.TransferStats)
+		defer stats.Report(os.Stderr)
+	}
 	return withClient(*config, *proxyAddr, 0, func(ctx context.Context, client *telegram.Client, cfg *Config, store *tools.SessionStore) error {
+		ctx = tools.WithTransferStats(ctx, stats)
+		workerLimit, profileErr := downloadThreadLimit(ctx, *threads, threadsExplicit, cfg.BotToken != "", func(ctx context.Context) (bool, error) {
+			me, err := client.Self(ctx)
+			if err != nil {
+				return false, err
+			}
+			return me.Premium && !me.Bot, nil
+		})
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if profileErr != nil {
+			fmt.Fprintf(os.Stderr, "无法确认 Premium 状态，下载使用普通并发上限 %d\n", workerLimit)
+		}
 		manager := tools.NewPeerManager(client.API(), store)
 		peer, err := manager.Resolve(ctx, *channelID)
 		if err != nil {
@@ -201,8 +226,10 @@ func runDownloadCommand(args []string) error {
 			Date:     dateRange,
 			Prefix:   *prefix,
 			SavePath: cfg.SavePath,
-			Threads:  *threads,
+			Threads:  workerLimit,
 			Manager:  manager,
+			Resume:   *resume,
+			Stats:    stats,
 		})
 	})
 }
@@ -211,6 +238,7 @@ func runUploadCommand(args []string) error {
 	fs := flag.NewFlagSet("upload", flag.ContinueOnError)
 	config, proxyAddr := commonFlags(fs)
 	threads := fs.Int("threads", tools.DefaultThreads, "分片并发数")
+	transferStats := fs.Bool("transfer-stats", false, "在 stderr 输出传输诊断")
 	channelID := fs.String("id", "", "频道 ID、@用户名或 me")
 	path := fs.String("path", "", "要上传的文件或目录")
 	deleteAfter := fs.String("dau", "N", "上传后是否删除源文件 (Y/N)")
@@ -236,7 +264,13 @@ func runUploadCommand(args []string) error {
 		return fmt.Errorf("-dau 只能为 Y 或 N")
 	}
 
+	var stats *tools.TransferStats
+	if *transferStats {
+		stats = new(tools.TransferStats)
+		defer stats.Report(os.Stderr)
+	}
 	return withClient(*config, *proxyAddr, 0, func(ctx context.Context, client *telegram.Client, cfg *Config, store *tools.SessionStore) error {
+		ctx = tools.WithTransferStats(ctx, stats)
 		peer, err := tools.NewPeerManager(client.API(), store).Resolve(ctx, *channelID)
 		if err != nil {
 			return err
@@ -272,16 +306,6 @@ func withClient(
 		return err
 	}
 	defer func() { _ = store.Close() }()
-
-	// 首次运行（库里还没有会话）时把改造前的两个 JSON 导入，之后就不再读它们了。
-	imported, err := store.ImportLegacy(cfg.LegacySessionPath(), cfg.LegacyPeerStoragePath())
-	if err != nil {
-		return err
-	}
-	if imported {
-		fmt.Fprintf(os.Stderr, "已把旧的会话与 peer 缓存合并进 %s，原 .gotd.json / .peers.json 不再使用（可自行删除）\n",
-			cfg.SessionPath())
-	}
 
 	client, err := NewTelegramClient(cfg, proxyAddr, store)
 	if err != nil {

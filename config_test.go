@@ -135,27 +135,23 @@ func TestParseEnvFile(t *testing.T) {
 	}
 }
 
-// 会话标识取 Python 版 md5(phone or bot_token) 的前 16 位。
-// 下面注释里的 32 位值是用 Python 版 tools/tool.py 的 md5() 实测得到的。
-func TestSessionNameIsPythonMD5Prefix(t *testing.T) {
-	cases := []struct {
-		name      string
-		cfg       Config
-		pythonMD5 string // Python 版 md5() 的完整输出
+func TestSessionPathUsesStandaloneFilename(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cfg  Config
+		id   string
 	}{
-		// md5("13800138000")
-		{"手机号登录", Config{Phone: "13800138000"}, "7945bd83237335e5376ff44d62e4f0ae"},
-		// md5("123:abc")
-		{"机器人登录", Config{BotToken: "123:abc"}, "ebecf09cd7c661306f05c7c7fa017549"},
-	}
-	for _, c := range cases {
-		got := c.cfg.SessionName()
-		if len(got) != 16 {
-			t.Errorf("%s: SessionName() = %q，长度应为 16", c.name, got)
-		}
-		if want := c.pythonMD5[:16]; got != want {
-			t.Errorf("%s: SessionName() = %q，期望是 Python md5 的前 16 位 %q", c.name, got, want)
-		}
+		{"phone", Config{Phone: "13800138000"}, "7945bd83237335e5"},
+		{"bot", Config{BotToken: "123:abc"}, "ebecf09cd7c66130"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.cfg.SessionName(); got != tc.id {
+				t.Errorf("SessionName() = %q, want %q", got, tc.id)
+			}
+			if got, want := tc.cfg.SessionPath(), tc.id+".teledown.sqlite3"; got != want {
+				t.Errorf("SessionPath() = %q, want %q", got, want)
+			}
+		})
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -90,24 +91,154 @@ func TestRetryUploadPartStops(t *testing.T) {
 	}
 }
 
-func TestCheckUploadSize(t *testing.T) {
-	const limit = int64(2_097_152_000)
+func TestRetryUploadPartBoundsFalseAcknowledgements(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		start := time.Now()
+		var attempts []time.Duration
+		ok, err := retryUploadPart(t.Context(), func() (bool, error) {
+			attempts = append(attempts, time.Since(start))
+			return false, nil
+		})
+		if ok || err == nil || !slices.Equal(attempts, []time.Duration{0, time.Second, 3 * time.Second}) {
+			t.Fatalf("分片结果 = %t, %v；尝试时刻 %v", ok, err, attempts)
+		}
+	})
+}
+
+func TestUploadPartSize(t *testing.T) {
+	const normal, premium = int64(2_097_152_000), int64(4_194_304_000)
+	const kib = 1024
 	for _, tc := range []struct {
 		name    string
 		size    int64
+		max     int
 		premium bool
-		wantErr bool
+		want    int
 	}{
-		{"普通账号低于上限", limit - 1, false, false},
-		{"普通账号等于上限", limit, false, false},
-		{"普通账号超出一字节", limit + 1, false, true},
-		{"Premium 不受普通账号上限限制", limit + 1, true, false},
+		{"普通账号低于上限", normal - 1, 4000, false, 512 * kib},
+		{"普通账号等于上限", normal, 4000, false, 512 * kib},
+		{"普通账号超出一字节", normal + 1, 4000, false, 0},
+		{"Premium 高于普通账号上限", normal + 1, 8000, true, 512 * kib},
+		{"Premium 等于上限", premium, 8000, true, 512 * kib},
+		{"Premium 超出一字节", premium + 1, 8000, true, 0},
+		{"服务器上限低于默认值", 512*kib + 1, 1, false, 0},
+		{"服务器上限决定分片大小", 128*kib + 1, 1, false, 256 * kib},
+		{"小文件保留 SDK 的默认分片大小", 10 << 20, 4000, false, 128 * kib},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if err := checkUploadSize(tc.size, tc.premium); (err != nil) != tc.wantErr {
-				t.Fatalf("大小预检错误 = %v，预期报错 = %t", err, tc.wantErr)
+			got, err := uploadPartSize(tc.size, tc.max, tc.premium)
+			if got != tc.want || (err != nil) != (tc.want == 0) {
+				t.Fatalf("分片大小 = %v, %v，预期 %d", got, err, tc.want)
 			}
 		})
+	}
+}
+
+func TestUploadPartsLimit(t *testing.T) {
+	obj := &tg.HelpAppConfig{Config: &tg.JSONObject{Value: []tg.JSONObjectValue{
+		{Key: "upload_max_fileparts_default", Value: &tg.JSONNumber{Value: 3000}},
+		{Key: "upload_max_fileparts_premium", Value: &tg.JSONNumber{Value: 9000}},
+	}}}
+	bad := &tg.HelpAppConfig{Config: &tg.JSONObject{Value: []tg.JSONObjectValue{
+		{Key: "upload_max_fileparts_default", Value: &tg.JSONNumber{Value: 4.5}},
+		{Key: "upload_max_fileparts_premium", Value: &tg.JSONNumber{Value: 1 << 31}},
+	}}}
+	for _, tc := range []struct {
+		name    string
+		res     tg.HelpAppConfigClass
+		err     error
+		premium bool
+		want    int
+	}{
+		{"普通账号服务端配置", obj, nil, false, 3000},
+		{"Premium 服务端配置", obj, nil, true, 9000},
+		{"忽略非整数", bad, nil, false, 4000},
+		{"忽略越界的分片数量", bad, nil, true, 8000},
+		{"未返回配置", &tg.HelpAppConfigNotModified{}, nil, false, 4000},
+		{"机器人或网络错误", nil, errors.New("unavailable"), false, 4000},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			api := tg.NewClient(peerTestInvoker(func(ctx context.Context, in bin.Encoder, out bin.Decoder) error {
+				calls++
+				if req, ok := in.(*tg.HelpGetAppConfigRequest); !ok || req.Hash != 0 {
+					t.Fatalf("预期请求完整配置，得到 %v", in)
+				}
+				if _, ok := ctx.Deadline(); !ok {
+					t.Fatal("配置 RPC 缺少超时")
+				}
+				out.(*tg.HelpAppConfigBox).AppConfig = tc.res
+				return tc.err
+			}))
+			if got := uploadPartsLimit(t.Context(), api, tc.premium); got != tc.want || calls != 1 {
+				t.Fatalf("分片上限 = %d，调用 %d 次；期望 %d, 1", got, calls, tc.want)
+			}
+		})
+	}
+}
+
+func TestUploadRejectsOversizeBeforeSendingParts(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "large.mp4")
+	if err := os.WriteFile(path, make([]byte, 512*1024+1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	api := tg.NewClient(peerTestInvoker(func(_ context.Context, in bin.Encoder, out bin.Decoder) error {
+		if _, ok := in.(*tg.HelpGetAppConfigRequest); !ok {
+			t.Fatalf("超限文件不应发送 RPC %T", in)
+		}
+		out.(*tg.HelpAppConfigBox).AppConfig = &tg.HelpAppConfig{Config: &tg.JSONObject{Value: []tg.JSONObjectValue{
+			{Key: "upload_max_fileparts_premium", Value: &tg.JSONNumber{Value: 1}},
+		}}}
+		return nil
+	}))
+	opt := UploadOptions{Path: path, Premium: true, DeleteAfter: true}
+	err := Upload(t.Context(), api, &Peer{Input: &tg.InputPeerSelf{}}, opt)
+	if err == nil || !strings.Contains(err.Error(), "524289 字节超过单文件上限 524288 字节") {
+		t.Fatalf("预检错误 = %v", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("超限文件不应被删除：%v", err)
+	}
+}
+
+func TestUploadDoesNotReplayOnSendFailure(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tiny.txt")
+	if err := os.WriteFile(path, []byte("hello"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sendFailure := errors.New("发送结果不明确")
+	var configs, parts, sends int
+	api := tg.NewClient(peerTestInvoker(func(_ context.Context, in bin.Encoder, out bin.Decoder) error {
+		switch req := in.(type) {
+		case *tg.HelpGetAppConfigRequest:
+			configs++
+			return errors.New("unavailable")
+		case *tg.UploadSaveFilePartRequest:
+			parts++
+			if req.FilePart != 0 || string(req.Bytes) != "hello" {
+				t.Fatalf("分片 = %v", req)
+			}
+			out.(*tg.BoolBox).Bool = &tg.BoolTrue{}
+			return nil
+		case *tg.MessagesSendMediaRequest:
+			sends++
+			if parts != 1 {
+				t.Fatalf("发送消息时已传分片数 = %d，期望 1", parts)
+			}
+			return sendFailure
+		default:
+			t.Fatalf("意外 RPC %T", in)
+			return nil
+		}
+	}))
+	opt := UploadOptions{Path: path, Threads: 1, DeleteAfter: true}
+	err := Upload(t.Context(), api, &Peer{Input: &tg.InputPeerSelf{}}, opt)
+	if !errors.Is(err, sendFailure) || !strings.Contains(err.Error(), "文件分片已上传") ||
+		configs != 1 || parts != 1 || sends != 1 {
+		t.Fatalf("上传错误 = %v，配置/分片/发送次数 = %d/%d/%d", err, configs, parts, sends)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("发送失败应保留源文件：%v", err)
 	}
 }
 

@@ -57,8 +57,7 @@ func LoadConfig(path string) (*Config, error) {
 	return cfg, nil
 }
 
-// SessionName 计算会话文件名用的账号标识（md5 前 16 位），与 Python 版同一套算法。
-// 文件名与 Python 版不同（16 位 vs 32 位），避免两边同时运行时互相覆盖。
+// SessionName 计算会话文件名用的稳定账号标识（md5 前 16 位）。
 func (c *Config) SessionName() string {
 	seed := c.Phone
 	if seed == "" {
@@ -67,20 +66,9 @@ func (c *Config) SessionName() string {
 	return tools.SessionID(seed)
 }
 
-// SessionPath 是会话文件的路径：Telethon 风格的 SQLite 库，auth key 与 peer 的
-// access_hash 都在里面（实现见 tools/sessionstore.go），格式与 Python 版的 .session 通用。
+// SessionPath 返回 Go 版专用会话库的路径，与旧版 SQLite 和 JSON 文件名隔离。
 func (c *Config) SessionPath() string {
-	return c.SessionName() + ".session"
-}
-
-// LegacySessionPath / LegacyPeerStoragePath 是合并成 SQLite 之前用的两个 JSON 文件，
-// 只在首次运行时由 tools.SessionStore.ImportLegacy 读一次；旧文件不会自动删除。
-func (c *Config) LegacySessionPath() string {
-	return c.SessionName() + ".gotd.json"
-}
-
-func (c *Config) LegacyPeerStoragePath() string {
-	return c.SessionName() + ".peers.json"
+	return c.SessionName() + ".teledown.sqlite3"
 }
 
 // parseEnvFile 解析 KEY=VALUE 形式的环境文件。

@@ -36,7 +36,7 @@ const (
 
 // NewTelegramClient 构建客户端：会话落盘、可选 SOCKS5 代理、开启 CDN 下载流程。
 //
-// store 是 Telethon 风格的 SQLite 会话库（auth key + DC + 实体缓存都在里面），由调用方
+// store 是独立的 Go SQLite 会话库（gotd 会话数据及 peer 缓存），由调用方
 // 打开并负责关闭：下载/上传解析 peer 时还要用它当 peers.Storage。
 //
 // proxyOverride 非空时优先于 .env 中的 proxy，格式与 Python 版一致：

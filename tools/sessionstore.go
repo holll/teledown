@@ -1,113 +1,57 @@
 package tools
 
-// 本文件是会话与 peer 缓存的持久化：一个 Telethon 风格的 SQLite 库。
-//
-// 之前是两份 JSON——<账号标识>.gotd.json 存 auth key 与 DC，<账号标识>.peers.json 存
-// access_hash（见 config.go），现在合并成一个 <账号标识>.session，表结构与 Telethon 的
-// SQLiteSession 一致（https://github.com/LonamiWebs/Telethon/blob/master/telethon/sessions/sqlite.py）：
-//
-//	version       数据库版本，我们写 7
-//	sessions      auth key 与 DC           ← 对应 gotd 的 session.Storage
-//	entities      peer 的 access_hash      ← 对应 gotd 的 peers.Storage（也对应 Telethon 的实体缓存）
-//	sent_files    文件引用缓存             ← 本工具不用，建出来只为表结构与 Telethon 一致
-//	update_state  updates 游标             ← 同上
-//	store_state   本工具自用               ← Telethon 没有放「联系人版本号」的地方，单独开一张表
-//
-// 版本号写 7 而不是最新的 8：Telethon 读到 7 < CURRENT_VERSION 会自动 alter 升级，
-// 而老版本 Telethon 读到 8 会在解包 sessions 行时直接报错，写 7 两边都能用。
-//
-// entities 的主键用 Telethon 的「带标记 peer id」：用户 = +id，基础群 = -id，
-// 频道/超级群 = -1000000000000 - id（即 TDLib 的编码，见 constant.TDLibPeerID）。
-// gotd 的 peers.Key 用 Prefix 区分类型，两套编码在这里互转。
-
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
+	"encoding/binary"
 	"errors"
 	"fmt"
-	"net"
+	"io"
 	"net/url"
 	"os"
 	"path/filepath"
-	"strconv"
+	"runtime"
 	"strings"
-	"time"
 
-	"github.com/gotd/td/constant"
-	"github.com/gotd/td/crypto"
 	"github.com/gotd/td/session"
-	"github.com/gotd/td/telegram/dcs"
 	"github.com/gotd/td/telegram/peers"
-	"github.com/gotd/td/tg"
 
-	_ "modernc.org/sqlite" // 纯 Go 的 SQLite 驱动：不引入 cgo，交叉编译不受影响
+	_ "modernc.org/sqlite" // 纯 Go 的 SQLite 驱动，不依赖 cgo。
 )
 
-// sessionSchema 是建表语句，与 Telethon 逐一对应（多出的 store_state 见文件头说明）。
-const sessionSchema = `
-CREATE TABLE IF NOT EXISTS version (
-    version integer primary key
-);
-CREATE TABLE IF NOT EXISTS sessions (
-    dc_id integer primary key,
-    server_address text,
-    port integer,
-    auth_key blob,
-    takeout_id integer
-);
-CREATE TABLE IF NOT EXISTS entities (
-    id integer primary key,
-    hash integer not null,
-    username text,
-    phone integer,
-    name text,
-    date integer
-);
-CREATE TABLE IF NOT EXISTS sent_files (
-    md5_digest blob,
-    file_size integer,
-    type integer,
-    id integer,
-    hash integer,
-    primary key (md5_digest, file_size, type)
-);
-CREATE TABLE IF NOT EXISTS update_state (
-    id integer primary key,
-    pts integer,
-    qts integer,
-    date integer,
-    seq integer
-);
-CREATE TABLE IF NOT EXISTS store_state (
-    key text primary key,
-    value integer
-);`
-
-// telethonVersion 是我们写入的数据库版本，理由见文件头。
-const telethonVersion = 7
-
-// contactsHashKey 是 store_state 里存联系人版本号的键。
-const contactsHashKey = "contacts_hash"
-
-// gotd 的 peers.Storage 用这三个前缀区分实体类型（peers/storage.go 的内部常量）。
-// 要让 entities.id 与 Telethon 对得上，只能把取值写在这里；
-// 前缀不认识时报错而不是猜，避免往共享的会话库里写进错误的 ID。
 const (
+	sessionApplicationID = 0x5444574e // TDWN
+	sessionSchemaVersion = 1
+	// gotd peers 的键前缀；缓存直接使用该字符串，不转换 ID。
+	prefixChannel = "channel_"
 	prefixUsers   = "users_"
 	prefixChats   = "chats_"
-	prefixChannel = "channel_"
 )
 
-// gotdSessionFile 是 gotd 的 session.Loader 落盘用的 JSON 结构（session 包里的 jsonData 不导出）。
-type gotdSessionFile struct {
-	Version int
-	Data    session.Data
-}
+const sessionSchema = `
+CREATE TABLE gotd_session (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    payload BLOB NOT NULL
+) STRICT;
+CREATE TABLE peer_cache (
+    id INTEGER NOT NULL,
+    prefix TEXT NOT NULL,
+    access_hash INTEGER NOT NULL,
+    PRIMARY KEY (id, prefix)
+) STRICT;
+CREATE TABLE peer_phones (
+    phone TEXT PRIMARY KEY NOT NULL,
+    id INTEGER NOT NULL,
+    prefix TEXT NOT NULL
+) STRICT;
+CREATE INDEX peer_phones_by_peer ON peer_phones (id, prefix);
+CREATE TABLE contacts_state (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    hash INTEGER NOT NULL
+) STRICT;`
 
-// SessionStore 同时实现 gotd 的 session.Storage（sessions 表）与 peers.Storage（entities 表）。
-//
-// 一个实例对应一个文件，方法可在多个 goroutine 间并发调用。
+// SessionStore 在一个独立的 SQLite 文件中同时实现 gotd 的会话存储与 peer 缓存。
+// 同一个实例可由多个 goroutine 使用。
 type SessionStore struct {
 	path string
 	db   *sql.DB
@@ -118,27 +62,106 @@ var (
 	_ peers.Storage   = (*SessionStore)(nil)
 )
 
-// OpenSessionStore 打开（不存在则新建）会话库并建好表。
+// OpenSessionStore 新建或打开专用会话库；不导入、改写或接管其他格式的文件。
+// 目录应由当前用户控制；Windows 上文件访问权限由目录的继承 ACL 决定。
 func OpenSessionStore(path string) (*SessionStore, error) {
-	// busy_timeout：Python 版可能同时开着同一个库，遇到锁时等一会儿而不是立刻失败。
+	if path == "" {
+		return nil, errors.New("会话库路径不能为空")
+	}
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return nil, fmt.Errorf("解析会话库路径失败: %w", err)
 	}
+	switch name := strings.ToLower(strings.TrimRight(filepath.Base(abs), ". ")); {
+	case strings.HasSuffix(name, ".session"), strings.HasSuffix(name, ".gotd.json"), strings.HasSuffix(name, ".peers.json"):
+		return nil, fmt.Errorf("拒绝使用旧版会话或缓存文件名 %s", path)
+	}
+
+	// 不让 SQLite 自己建库：这样文件从创建起就是私有的，且不会截断已有文件。
+	// 同时确保 SQLite 不会使用已有的不安全的辅助文件。
+	for _, suffix := range []string{"-journal", "-wal", "-shm"} {
+		if _, err := privateFileInfo(abs + suffix); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("检查会话库辅助文件失败: %w", err)
+		}
+	}
+	f, err := os.OpenFile(abs, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	created := err == nil
+	switch {
+	case created:
+		if err := f.Close(); err != nil {
+			return nil, fmt.Errorf("关闭新会话库文件 %s 失败: %w", path, err)
+		}
+	case errors.Is(err, os.ErrExist):
+		if err := verifySessionHeader(abs); err != nil {
+			return nil, fmt.Errorf("拒绝打开会话库 %s: %w", path, err)
+		}
+	default:
+		return nil, fmt.Errorf("创建会话库 %s 失败: %w", path, err)
+	}
+
 	db, err := sql.Open("sqlite", sessionDSN(abs))
 	if err != nil {
 		return nil, fmt.Errorf("打开会话库 %s 失败: %w", path, err)
 	}
-	// 单连接：CLI 的并发很低，这样能避免多连接之间互相拿到 SQLITE_BUSY。
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
 
-	s := &SessionStore{path: path, db: db}
-	if err := s.init(); err != nil {
+	s := &SessionStore{path: abs, db: db}
+	if created {
+		err = s.init()
+	} else {
+		err = s.verifySchema()
+	}
+	if err != nil {
 		_ = db.Close()
-		return nil, err
+		return nil, fmt.Errorf("打开会话库 %s 失败: %w", path, err)
 	}
 	return s, nil
+}
+
+func privateFileInfo(path string) (os.FileInfo, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s 不是普通文件（不允许符号链接）", path)
+	}
+	if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
+		return nil, fmt.Errorf("%s 权限过宽，请将权限设为 0600", path)
+	}
+	return info, nil
+}
+
+// 检查 SQLite 文件头后再用 SQLite 打开：不让 SQLite 对未知库执行日志恢复等操作。
+func verifySessionHeader(path string) error {
+	info, err := privateFileInfo(path)
+	if err != nil {
+		return err
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	opened, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if !os.SameFile(info, opened) {
+		return errors.New("会话库文件已被替换")
+	}
+	var header [100]byte
+	if _, err := io.ReadFull(f, header[:]); err != nil {
+		return fmt.Errorf("无法读取 SQLite 文件头: %w", err)
+	}
+	if string(header[:16]) != "SQLite format 3\x00" || binary.BigEndian.Uint32(header[68:72]) != sessionApplicationID {
+		return errors.New("不是 teledown Go 会话库；旧版会话文件不会被导入")
+	}
+	if version := binary.BigEndian.Uint32(header[60:64]); version != sessionSchemaVersion {
+		return fmt.Errorf("不支持 teledown Go 会话库版本 %d（需要版本 %d）", version, sessionSchemaVersion)
+	}
+	return nil
 }
 
 // sessionDSN requires an absolute path. Escape filename bytes (such as ? and #)
@@ -148,22 +171,41 @@ func sessionDSN(abs string) string {
 	if !strings.HasPrefix(path, "/") {
 		path = "/" + path
 	}
-	u := url.URL{Scheme: "file", Path: path, RawQuery: "_pragma=busy_timeout(5000)"}
+	u := url.URL{Scheme: "file", Path: path, RawQuery: "mode=rw&_pragma=busy_timeout(5000)&_pragma=trusted_schema(OFF)"}
 	return u.String()
 }
 
-// init 建表并补版本号。
 func (s *SessionStore) init() error {
-	if _, err := s.db.Exec(sessionSchema); err != nil {
-		return fmt.Errorf("初始化会话库 %s 失败: %w", s.path, err)
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
 	}
-	// 只在没有版本号时写入：Telethon 升级过的库（比如 8）保持原样不动。
-	const stmt = `INSERT INTO version (version) SELECT ?
-		WHERE NOT EXISTS (SELECT 1 FROM version)`
-	if _, err := s.db.Exec(stmt, telethonVersion); err != nil {
-		return fmt.Errorf("写入会话库版本号失败: %w", err)
+	defer tx.Rollback()
+	if _, err := tx.Exec(sessionSchema); err != nil {
+		return err
 	}
-	return nil
+	if _, err := tx.Exec(fmt.Sprintf("PRAGMA application_id = %d; PRAGMA user_version = %d", sessionApplicationID, sessionSchemaVersion)); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *SessionStore) verifySchema() error {
+	var applicationID, version int
+	if err := s.db.QueryRow(`SELECT application_id, user_version FROM pragma_application_id(), pragma_user_version()`).Scan(&applicationID, &version); err != nil {
+		return err
+	}
+	if applicationID != sessionApplicationID || version != sessionSchemaVersion {
+		return errors.New("会话库标记或版本不匹配")
+	}
+	// 验证必需的表和列存在，但不读取或修改任何数据。
+	rows, err := s.db.Query(`SELECT s.singleton, s.payload, p.id, p.prefix, p.access_hash,
+		f.phone, f.id, f.prefix, c.singleton, c.hash
+		FROM gotd_session s, peer_cache p, peer_phones f, contacts_state c LIMIT 0`)
+	if err != nil {
+		return err
+	}
+	return rows.Close()
 }
 
 // Close 关闭会话库。
@@ -174,101 +216,36 @@ func (s *SessionStore) Close() error {
 	return s.db.Close()
 }
 
-// LoadSession 实现 gotd 的 session.Storage：从 sessions 表还原会话。
-//
-// 没有授权（没有行、或 Telethon 写的空 BLOB，见其 _update_session_table）时返回
-// session.ErrNotFound，gotd 会按「未登录」处理并走登录流程。
+// LoadSession returns the exact payload most recently written by gotd.
 func (s *SessionStore) LoadSession(ctx context.Context) ([]byte, error) {
-	var (
-		dcID int
-		addr sql.NullString
-		port sql.NullInt64
-		key  []byte
-	)
-	// 不写 SELECT *：老版 Telethon 的 sessions 是 5 列，新版多了 tmp_auth_key，
-	// 按列名取才能两种库都读。
-	err := s.db.QueryRowContext(ctx,
-		`SELECT dc_id, server_address, port, auth_key FROM sessions LIMIT 1`,
-	).Scan(&dcID, &addr, &port, &key)
+	var payload []byte
+	err := s.db.QueryRowContext(ctx, `SELECT payload FROM gotd_session WHERE singleton = 1`).Scan(&payload)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, session.ErrNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("读取会话失败: %w", err)
 	}
-
-	// auth key 必须正好 256 字节：长度不对说明库里的不是可用的密钥，
-	// 当作未登录，免得 gotd 拿着坏 key 去握手（它会报 "corrupted key"）。
-	var authKey crypto.Key
-	if len(key) != len(authKey) {
-		return nil, session.ErrNotFound
-	}
-	copy(authKey[:], key)
-	authKeyID := authKey.WithID().ID
-
-	data := session.Data{
-		DC:        dcID,
-		Addr:      joinHostPort(addr.String, port.Int64),
-		AuthKey:   authKey[:],
-		AuthKeyID: authKeyID[:],
-	}
-	return json.Marshal(gotdSessionFile{Version: 1, Data: data})
+	return payload, nil
 }
 
-// StoreSession 实现 gotd 的 session.Storage：把会话写进 sessions 表。
-//
-// 与 Telethon 一样只保留一行（它每次都是 delete + insert）。gotd 传进来的是
-// session.Loader 序列化好的 JSON，这里解出 DC、地址与 auth key 存下；
-// Config 无处可放，丢弃即可——gotd 的 DC 列表与 config 都来自服务端，不依赖落盘的那份。
-func (s *SessionStore) StoreSession(ctx context.Context, raw []byte) error {
-	var file gotdSessionFile
-	if err := json.Unmarshal(raw, &file); err != nil {
-		return fmt.Errorf("解析会话数据失败: %w", err)
+// StoreSession saves the entire gotd payload without decoding or transforming it.
+func (s *SessionStore) StoreSession(ctx context.Context, payload []byte) error {
+	if payload == nil {
+		payload = []byte{}
 	}
-	data := file.Data
-
-	host, port := splitHostPort(data.Addr)
-	if host == "" {
-		// gotd 只在连接成功后落盘，Addr 一直是空的（它从不下发这个字段），
-		// 这里按 DC 补一个真实地址，好让 Python 版拿到能用的 server_address。
-		host, port = dcAddress(data.DC, nil)
-	}
-
-	tx, err := s.db.BeginTx(ctx, nil)
+	_, err := s.db.ExecContext(ctx, `INSERT INTO gotd_session (singleton, payload) VALUES (1, ?)
+		ON CONFLICT(singleton) DO UPDATE SET payload = excluded.payload`, payload)
 	if err != nil {
-		return fmt.Errorf("写入会话失败: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	if _, err := tx.ExecContext(ctx, `DELETE FROM sessions`); err != nil {
-		return fmt.Errorf("写入会话失败: %w", err)
-	}
-	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO sessions (dc_id, server_address, port, auth_key, takeout_id) VALUES (?, ?, ?, ?, NULL)`,
-		data.DC, host, port, data.AuthKey,
-	); err != nil {
-		return fmt.Errorf("写入会话失败: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("写入会话失败: %w", err)
 	}
 	return nil
 }
 
-// Save 实现 peers.Storage，写 Telethon 的 entities 表。
-//
-// 只更新 hash 与 date，不碰 username / phone / name：这几个字段本工具没有，
-// 但可能是 Python 版写进去的，覆盖掉会丢信息。
+// Save 实现 peers.Storage。
 func (s *SessionStore) Save(ctx context.Context, key peers.Key, value peers.Value) error {
-	id, err := entityID(key)
-	if err != nil {
-		return err
-	}
-	_, err = s.db.ExecContext(ctx,
-		`INSERT INTO entities (id, hash, date) VALUES (?, ?, ?)
-		 ON CONFLICT(id) DO UPDATE SET hash = excluded.hash, date = excluded.date`,
-		id, value.AccessHash, time.Now().Unix(),
-	)
+	_, err := s.db.ExecContext(ctx, `INSERT INTO peer_cache (id, prefix, access_hash) VALUES (?, ?, ?)
+		ON CONFLICT(id, prefix) DO UPDATE SET access_hash = excluded.access_hash`, key.ID, key.Prefix, value.AccessHash)
 	if err != nil {
 		return fmt.Errorf("写入 peer 缓存失败: %w", err)
 	}
@@ -277,288 +254,101 @@ func (s *SessionStore) Save(ctx context.Context, key peers.Key, value peers.Valu
 
 // Find 实现 peers.Storage。
 func (s *SessionStore) Find(ctx context.Context, key peers.Key) (peers.Value, bool, error) {
-	id, err := entityID(key)
-	if err != nil {
-		return peers.Value{}, false, err
-	}
-
-	var hash int64
-	err = s.db.QueryRowContext(ctx, `SELECT hash FROM entities WHERE id = ?`, id).Scan(&hash)
+	var value peers.Value
+	err := s.db.QueryRowContext(ctx, `SELECT access_hash FROM peer_cache WHERE id = ? AND prefix = ?`,
+		key.ID, key.Prefix).Scan(&value.AccessHash)
 	if errors.Is(err, sql.ErrNoRows) {
 		return peers.Value{}, false, nil
 	}
 	if err != nil {
 		return peers.Value{}, false, fmt.Errorf("读取 peer 缓存失败: %w", err)
 	}
-	return peers.Value{AccessHash: hash}, true, nil
+	return value, true, nil
 }
 
-// SavePhone 实现 peers.Storage：手机号存在 entities.phone 列（Telethon 的 get_entity_rows_by_phone 同款）。
-//
-// 实体行由 Save 先写好，这里只补号码；MTProto 的手机号是纯数字，
-// 交给 SQLite 的 INTEGER 列自行转换（Telethon 也是这么存的）。
+// SavePhone 保存按文本精确匹配的手机号映射；它可以先于对应 peer 写入。
 func (s *SessionStore) SavePhone(ctx context.Context, phone string, key peers.Key) error {
-	id, err := entityID(key)
+	_, err := s.db.ExecContext(ctx, `INSERT INTO peer_phones (phone, id, prefix) VALUES (?, ?, ?)
+		ON CONFLICT(phone) DO UPDATE SET id = excluded.id, prefix = excluded.prefix`, phone, key.ID, key.Prefix)
 	if err != nil {
-		return err
-	}
-	if _, err := s.db.ExecContext(ctx, `UPDATE entities SET phone = ? WHERE id = ?`, phone, id); err != nil {
-		return fmt.Errorf("写入手机号失败: %w", err)
+		return fmt.Errorf("写入手机号映射失败: %w", err)
 	}
 	return nil
 }
 
-// FindPhone 实现 peers.Storage。手机号只会出现在用户实体上，但这里统一按标记 ID 解回来。
+// FindPhone 查询手机号映射及其关联的 peer 缓存。
 func (s *SessionStore) FindPhone(ctx context.Context, phone string) (peers.Key, peers.Value, bool, error) {
-	var (
-		id   int64
-		hash int64
-	)
-	err := s.db.QueryRowContext(ctx, `SELECT id, hash FROM entities WHERE phone = ?`, phone).Scan(&id, &hash)
+	var key peers.Key
+	var value peers.Value
+	var hash sql.NullInt64
+	err := s.db.QueryRowContext(ctx, `SELECT f.id, f.prefix, p.access_hash FROM peer_phones f
+		LEFT JOIN peer_cache p ON p.id = f.id AND p.prefix = f.prefix WHERE f.phone = ?`, phone).
+		Scan(&key.ID, &key.Prefix, &hash)
 	if errors.Is(err, sql.ErrNoRows) {
 		return peers.Key{}, peers.Value{}, false, nil
 	}
 	if err != nil {
 		return peers.Key{}, peers.Value{}, false, fmt.Errorf("按手机号读取 peer 缓存失败: %w", err)
 	}
-
-	key, err := peerKey(id)
-	if err != nil {
-		return peers.Key{}, peers.Value{}, false, err
-	}
-	return key, peers.Value{AccessHash: hash}, true, nil
+	value.AccessHash = hash.Int64
+	return key, value, hash.Valid, nil
 }
 
 // GetContactsHash 实现 peers.Storage。
 func (s *SessionStore) GetContactsHash(ctx context.Context) (int64, error) {
-	var value int64
-	err := s.db.QueryRowContext(ctx, `SELECT value FROM store_state WHERE key = ?`, contactsHashKey).Scan(&value)
+	var hash int64
+	err := s.db.QueryRowContext(ctx, `SELECT hash FROM contacts_state WHERE singleton = 1`).Scan(&hash)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, nil
 	}
 	if err != nil {
 		return 0, fmt.Errorf("读取联系人版本号失败: %w", err)
 	}
-	return value, nil
+	return hash, nil
 }
 
 // SaveContactsHash 实现 peers.Storage。
 func (s *SessionStore) SaveContactsHash(ctx context.Context, hash int64) error {
-	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO store_state (key, value) VALUES (?, ?)
-		 ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
-		contactsHashKey, hash,
-	)
+	_, err := s.db.ExecContext(ctx, `INSERT INTO contacts_state (singleton, hash) VALUES (1, ?)
+		ON CONFLICT(singleton) DO UPDATE SET hash = excluded.hash`, hash)
 	if err != nil {
 		return fmt.Errorf("写入联系人版本号失败: %w", err)
 	}
 	return nil
 }
 
-// ForgetChannel 只删除频道缓存，避免误删同数字 ID 的用户或基础群。
+// ForgetChannel 只删除频道缓存，避免误删相同数字 ID 的用户或基础群。
 func (s *SessionStore) ForgetChannel(id int64) {
-	var channel constant.TDLibPeerID
-	channel.Channel(id)
-	if _, err := s.db.Exec(`DELETE FROM entities WHERE id = ?`, int64(channel)); err != nil {
-		fmt.Fprintf(os.Stderr, "提示：peer 缓存删除失败（不影响下载）: %v\n", err)
-	}
+	s.forgetPeer(id, prefixChannel)
 }
 
-// ForgetID 删除某个 ID 的所有缓存（不分类型），用于 access_hash 失效后强制重新解析。
-//
-// ID 只在同类型内唯一，所以把用户、群、频道三种标记形式都删掉——代价可忽略，
-// 而不用去猜调用方说的 ID 是哪一类（与之前 JSON 版的行为一致）。
+// ForgetID 删除数字 ID 相同的所有 peer 缓存以及相关手机号映射。
 func (s *SessionStore) ForgetID(id int64) {
-	var user, chat, channel constant.TDLibPeerID
-	user.User(id)
-	chat.Chat(id)
-	channel.Channel(id)
-	if _, err := s.db.Exec(`DELETE FROM entities WHERE id IN (?, ?, ?)`,
-		int64(user), int64(chat), int64(channel)); err != nil {
+	s.forgetPeer(id, "")
+}
+
+func (s *SessionStore) forgetPeer(id int64, prefix string) {
+	if err := s.deletePeer(id, prefix); err != nil {
 		fmt.Fprintf(os.Stderr, "提示：peer 缓存删除失败（不影响下载）: %v\n", err)
 	}
 }
 
-// ImportLegacy 把改造前的 <账号标识>.gotd.json 与 <账号标识>.peers.json 合并进本库，
-// 返回是否真的导入了（用来提示用户「旧文件已经不用了」）。
-//
-// 只在库里还没有会话时迁移。已经有会话说明这是新版自己登录出来的状态，
-// 此时再读旧文件只会帮倒忙：旧的 auth key 可能已被换掉，旧的 access_hash 也可能
-// 比 Python 版刚写进去的旧。文件不存在不算错误——那就是还没登录的正常状态。
-// 原文件不删，由用户自行处理。
-func (s *SessionStore) ImportLegacy(sessionPath, peersPath string) (bool, error) {
-	switch _, err := s.LoadSession(context.Background()); {
-	case err == nil:
-		return false, nil
-	case !errors.Is(err, session.ErrNotFound):
-		return false, err
-	}
-
-	imported, err := s.importLegacySession(sessionPath)
+func (s *SessionStore) deletePeer(id int64, prefix string) error {
+	tx, err := s.db.Begin()
 	if err != nil {
-		return imported, err
+		return err
 	}
-	if err := s.importLegacyPeers(peersPath); err != nil {
-		return imported, err
+	defer tx.Rollback()
+	where, args := ` WHERE id = ?`, []any{id}
+	if prefix != "" {
+		where += ` AND prefix = ?`
+		args = append(args, prefix)
 	}
-	return imported, nil
-}
-
-// importLegacySession 导入旧版 .gotd.json 里的 auth key 与 DC。
-func (s *SessionStore) importLegacySession(path string) (bool, error) {
-	raw, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return false, nil
+	if _, err := tx.Exec(`DELETE FROM peer_phones`+where, args...); err != nil {
+		return err
 	}
-	if err != nil {
-		return false, fmt.Errorf("读取旧会话文件 %s 失败: %w", path, err)
+	if _, err := tx.Exec(`DELETE FROM peer_cache`+where, args...); err != nil {
+		return err
 	}
-
-	var file gotdSessionFile
-	if err := json.Unmarshal(raw, &file); err != nil {
-		// 旧会话文件里是凭据，不能像缓存那样默默丢掉
-		return false, fmt.Errorf("解析旧会话文件 %s 失败: %w", path, err)
-	}
-	// 旧文件里 gotd 也没写过 Addr，改用文件里那份 DC 列表挑地址最准（比内置列表新）。
-	if file.Data.Addr == "" {
-		host, port := dcAddress(file.Data.DC, file.Data.Config.DCOptions)
-		file.Data.Addr = joinHostPort(host, port)
-	}
-	migrated, err := json.Marshal(gotdSessionFile{Version: 1, Data: file.Data})
-	if err != nil {
-		return false, fmt.Errorf("转换旧会话失败: %w", err)
-	}
-	if err := s.StoreSession(context.Background(), migrated); err != nil {
-		return false, err
-	}
-	return true, nil
-}
-
-// importLegacyPeers 导入旧版 peers.json 里存的 access_hash、手机号映射与联系人版本号。
-func (s *SessionStore) importLegacyPeers(path string) error {
-	raw, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("读取旧 peer 缓存 %s 失败: %w", path, err)
-	}
-
-	var legacy struct {
-		Peers        map[string]int64  `json:"peers"`
-		Phones       map[string]string `json:"phones"`
-		ContactsHash int64             `json:"contacts_hash"`
-	}
-	if err := json.Unmarshal(raw, &legacy); err != nil {
-		// 损坏的缓存没有挽救价值（重新扫一遍会话列表就能重建），不阻断启动
-		fmt.Fprintf(os.Stderr, "提示：旧 peer 缓存 %s 无法解析，已忽略: %v\n", path, err)
-		return nil
-	}
-
-	for key, hash := range legacy.Peers {
-		prefix, id := splitStorageKey(key)
-		if err := s.Save(context.Background(), peers.Key{Prefix: prefix, ID: id}, peers.Value{AccessHash: hash}); err != nil {
-			return fmt.Errorf("导入旧 peer 缓存失败: %w", err)
-		}
-	}
-	for phone, key := range legacy.Phones {
-		prefix, id := splitStorageKey(key)
-		if err := s.SavePhone(context.Background(), phone, peers.Key{Prefix: prefix, ID: id}); err != nil {
-			return fmt.Errorf("导入旧 peer 缓存失败: %w", err)
-		}
-	}
-	if legacy.ContactsHash != 0 {
-		if err := s.SaveContactsHash(context.Background(), legacy.ContactsHash); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// entityID 把 peers.Key 编码成 Telethon 的 entities.id（带标记 peer id）。
-//
-// 前缀取值来自 gotd（peers/storage.go 的内部常量，只会是用户/群/频道三种）；
-// 出现没见过的前缀直接报错：往共享的会话库里写一个含义不明的 ID，
-// 会让 Python 版按错误的类型去解析。
-func entityID(key peers.Key) (int64, error) {
-	var marked constant.TDLibPeerID
-	switch key.Prefix {
-	case prefixUsers:
-		marked.User(key.ID)
-	case prefixChats:
-		marked.Chat(key.ID)
-	case prefixChannel:
-		marked.Channel(key.ID)
-	default:
-		return 0, fmt.Errorf("未知的 peer 前缀 %q（ID %d）", key.Prefix, key.ID)
-	}
-	return int64(marked), nil
-}
-
-// peerKey 是 entityID 的逆运算：从带标记 peer id 还原 peers.Key。
-func peerKey(id int64) (peers.Key, error) {
-	marked := constant.TDLibPeerID(id)
-	switch {
-	case marked.IsChannel():
-		return peers.Key{Prefix: prefixChannel, ID: marked.ToPlain()}, nil
-	case marked.IsChat():
-		return peers.Key{Prefix: prefixChats, ID: marked.ToPlain()}, nil
-	case marked.IsUser():
-		return peers.Key{Prefix: prefixUsers, ID: marked.ToPlain()}, nil
-	}
-	return peers.Key{}, fmt.Errorf("entities.id %d 不是有效的 peer ID", id)
-}
-
-// splitStorageKey 从旧版 peers.json 的 "<prefix><id>" 键拆出前缀与 ID（ID 是尾部连续数字）。
-func splitStorageKey(key string) (prefix string, id int64) {
-	i := len(key)
-	for i > 0 && key[i-1] >= '0' && key[i-1] <= '9' {
-		i--
-	}
-	if i == len(key) {
-		// 没有尾部数字：整个 key 都是前缀（例如只写了 "channel_"）
-		return key, 0
-	}
-	parsed, err := strconv.ParseInt(key[i:], 10, 64)
-	if err != nil {
-		return "", 0
-	}
-	return key[:i], parsed
-}
-
-// dcAddress 取某个 DC 的首选地址：优先用服务端下发的列表（opts），没有就用 gotd 内置的生产列表。
-// 排序规则交给 gotd（IPv4 优先、静态地址优先），与它实际拨号时的选择一致。
-func dcAddress(dc int, opts []tg.DCOption) (string, int64) {
-	candidates := dcs.FindPrimaryDCs(opts, dc, false)
-	if len(candidates) == 0 {
-		candidates = dcs.FindPrimaryDCs(dcs.Prod().Options, dc, false)
-	}
-	if len(candidates) == 0 {
-		return "", 0
-	}
-	return candidates[0].IPAddress, int64(candidates[0].Port)
-}
-
-// joinHostPort 拼 "主机:端口"，缺任一项时按空串处理。
-func joinHostPort(host string, port int64) string {
-	if host == "" || port <= 0 {
-		return ""
-	}
-	return net.JoinHostPort(host, strconv.FormatInt(port, 10))
-}
-
-// splitHostPort 是 joinHostPort 的逆运算；只有主机没有端口（或反过来的脏数据）时返回空主机。
-func splitHostPort(addr string) (string, int64) {
-	if addr == "" {
-		return "", 0
-	}
-	host, portRaw, err := net.SplitHostPort(addr)
-	if err != nil {
-		return "", 0
-	}
-	port, err := strconv.ParseInt(portRaw, 10, 64)
-	if err != nil {
-		return "", 0
-	}
-	return host, port
+	return tx.Commit()
 }

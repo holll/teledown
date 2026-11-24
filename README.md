@@ -10,7 +10,7 @@
 
 | 项 | 说明 |
 |---|---|
-| 会话文件 | `<账号标识>.session`：Telethon 同构的 SQLite 库（见「会话存储」一节），账号标识取 md5 的**前 16 位**（Python 版是完整 32 位，文件名不同所以两边可以同时存在）。格式与 Telethon 通用，改个名就能给 Python 版用 |
+| 会话文件 | `<账号标识>.teledown.sqlite3`：Go 专用，首次升级须重新登录；旧会话文件不会被导入或修改 |
 | 数字 ID 解析 | 会先查持久化的 peer 缓存，未命中才扫一次会话列表拿 `access_hash`；账号未加入该会话则无法解析 |
 | `--range` | 支持 `100` 与 `=100` 单选；`100..200` 包含两个端点，与 Python v1.2.3 一致 |
 | `--prefix ""` | 视为「全部匹配」（等价 Python 的 `--prefix` 不传）；Python 版传空串会导致全部不匹配。Windows 下与 Python 的 `fnmatch` 一样**忽略大小写**（`*.MP4` 能匹配 `a.mp4`），其它平台区分大小写 |
@@ -27,9 +27,9 @@
 | 项 | 说明 |
 |---|---|
 | CDN 下载 | 用户账号自动开启 CDN 重定向；bot 账号自动关闭（服务端限制 bot 使用 `upload.getCdnFile`，被重定向后既取不到数也无法回退）；CDN 建连失败会自动降级到主 DC 再试一次 |
-| 分片并发 | 默认 4 路并发下载，`-threads` 可调 |
+| 分片并发 | 下载自适应窗口从最多 4 路起步，普通账号和机器人默认上限 4，确认是 Premium 时默认上限 8；`-threads` 优先。上传默认仍为 4 路 |
 | 分片校验 | `WithVerify(true)` 启用分片哈希校验，可发现 CDN 边缘节点返回的损坏数据 |
-| 上传大小预检 | 非 Premium 账号（含机器人）上传超过 2000 MiB 的文件时，在生成缩略图和上传分片之前拒绝；目录上传会继续处理其他文件 |
+| 上传大小预检 | 按普通账号（含机器人）和 Premium 的 Telegram 配置选择分片并检查上限；配置不可用时分别按 2000 / 4000 MiB 预检。超限文件在生成缩略图和上传分片前拒绝，目录上传继续处理其他文件 |
 | 视频属性 | 有 `ffprobe` 时自动读取时长与分辨率，上传后支持边下边播；无 `ffprobe` 则按普通文件上传并给出提示 |
 | 视频缩略图 | 有 `ffmpeg` 时抽首帧作为缩略图上传，接收端列表里能直接看到画面 |
 | 进度显示 | 进行中一行原地刷新，含百分比、字节数、速度、**已用 / 剩余时间**；单个文件结束后换成一条汇总行（大小、用时、平均速度）**保留在终端里**，一批文件跑完可以回看每个文件的耗时。输出被重定向（非终端）时只留汇总行，不写控制字符 |
@@ -88,14 +88,14 @@ Name: someusername
 ID: 123456789
 Bot: 否
 DC: 5
-会话文件: 7945bd83237335e5.session
+会话文件: 7945bd83237335e5.teledown.sqlite3
 -----login successful-----
 ```
 
 要点：
 
 - 会话文件已存在时直接复用，不会重复登录；不存在时会提示输入验证码，走完流程就写成新会话。
-- 首次运行若发现改造前的 `<账号标识>.gotd.json` / `<账号标识>.peers.json`，会把它们合并进会话库（原文件不删，也不再用）。
+- 从旧版 Go 升级需要重新登录一次。旧 `.session`、`.gotd.json`、`.peers.json` 不读取、不修改。
 - 未设置用户名时 `Name` 回退显示「名+姓」。
 - 登录失败会打印具体原因并以退出码 1 结束，方便脚本判断。
 - **有 60 秒总时限**：gotd 在连不上时会持续重连，不加限制会让自检无限等待。超时提示 `操作超时（1m0s），请检查网络与代理是否可用`。`download` / `upload` 不设总时限。
@@ -129,7 +129,7 @@ DC: 5
 服务端可能返回 `AUTH_RESTART`（要求从「发送验证码」重新走一遍），常见于上一次登录流程中断、或会话文件里残留了未完成的登录状态。处理方式与 Telethon 一致：自动重试最多 3 次（每次间隔 2 秒）。若三次都失败，会提示删除会话文件后重试：
 
 ```powershell
-Remove-Item *.session   # 会话文件里只有未完成的登录状态时，删掉不影响已登录的账号
+Remove-Item -LiteralPath .\7945bd83237335e5.teledown.sqlite3  # 停止程序后，仅替换为本账号的 Go 会话文件
 ```
 
 ```ini
@@ -231,11 +231,23 @@ build.bat --targets=darwin/arm64,linux/arm64 --no-upx
 go test ./...
 ```
 
-覆盖范围：文件名规则、`--range` 解析、重名文件处理、通配符匹配（含 Windows 下的大小写折叠）、`.env` 解析、SOCKS5 地址解析（含不写 scheme/端口的形式）、会话库（表结构与 Telethon 逐列对拍、peer 缓存读写、带标记 ID 的编码往返、旧 JSON 迁移）、图片尺寸选择（含 `PhotoSizeProgressive`）、JPEG 校验、验证码位数校验与中文提示、上传进度的并发回调。
+覆盖范围：文件名规则、`--range` 解析、重名文件处理、通配符匹配（含 Windows 下的大小写折叠）、`.env` 解析、SOCKS5 地址解析（含不写 scheme/端口的形式）、会话库（完整 payload 往返、版本与格式校验、peer 缓存读写、旧文件保留）、图片尺寸选择（含 `PhotoSizeProgressive`）、JPEG 校验、验证码位数校验与中文提示、上传进度的并发回调。
 
 涉及并发的用例建议带 `-race` 跑：`go test -race ./...`。缩略图相关用例需要本机装有 ffmpeg，没装会自动跳过。
 
 其中 `parity_test.go` 用 Python 版原函数的实际输出作为基准做跨语言对拍，确保 `shorten` 与通配符行为一致；两处刻意的行为差异在测试里注明。
+
+建议在另一台有足够内存的 **Linux / Windows amd64** 设备分别验证（Go 1.25 或更高）：
+
+```sh
+go mod verify
+go test ./...
+go vet ./...
+go build -trimpath -o teledown-go .
+./teledown-go --help
+```
+
+Windows 将最后两行替换为 `go build -trimpath -o teledown-go.exe .` 和 `.\teledown-go.exe --help`。有可用的 CGO 工具链时再跑 `go test -race ./...`。随后在测试频道用本人账号验证：首次 `info` 登录、第二次复用新库且旧文件不变；对已知内容的大文档执行 `download --resume --transfer-stats`，中断后重跑并比较最终 SHA-256；分别用照片、普通/会员账号及上传到 `me` 验证非续传路径、并发选项和失败时不删源文件。
 
 ## 限流（FLOOD_WAIT 等）
 
@@ -254,37 +266,26 @@ gotd 默认不处理 `FLOOD_WAIT`，会直接把 `rpc error code 420: FLOOD_WAIT
 策略部分（保留中文提示）在本工具里，行为与 Python 版一致：
 
 - 遇到 `FLOOD_WAIT` / `FLOOD_PREMIUM_WAIT` 时自动等待服务端要求的时间后重试，打印 `触发限流，等待 20s 后自动重试（第 1/3 次）`；
+- `FLOOD_PREMIUM_WAIT` 是针对免费账号的传输速率限制；Premium 也可能收到普通 `FLOOD_WAIT`，不会跳过等待。会员下载的 8 路只是本地并发上限，不保证提速倍数；身份查询失败则按普通账号下载；
+- 同一客户端内，普通上传分片（包括缩略图）和大文件分片共用冷却；不阻塞下载请求或消息提交。这是本地等待策略，不是服务端的固定配额；
 - 单个请求最多重试 3 次；
 - 要求的等待超过 10 分钟（与 Python 版的 `FLOOD_SLEEP_THRESHOLD` 一致）时不再硬等，直接报错说明需要等多久。
+
+`download` / `upload` 可加 `--transfer-stats`，在 stderr 汇总采样到的下载调度窗口、下载重试及主 DC 回退、上传同分片重试、媒体提交失败和各类限流。等待统计是已接受的服务端等待要求之和，不等于实际耗时；不自动开启额外的自适应请求节奏策略。
 
 遇到限流时**不要连续重跑命令**——每次立即重试都会让服务端把等待时间往上加。
 
 ## 会话存储（SQLite）
 
-会话就是**一个 Telethon 同构的 SQLite 库**（`<账号标识>.session`）：auth key、DC 与 peer 的 `access_hash` 都在里面，不再拆成两个 JSON。表结构与 Telethon 的 [`SQLiteSession`](https://github.com/LonamiWebs/Telethon/blob/master/telethon/sessions/sqlite.py) 一一对应（实现见 `tools/sessionstore.go`）：
+会话文件为 `<账号标识>.teledown.sqlite3`（账号标识仍使用 MD5 前 16 位）。SQLite 写入格式标识和 schema 版本，原样保存 gotd 的会话数据（含凭据和各 DC 状态），以及独立的 peer 缓存。Go 版不再兼容 Telethon 数据库或 StringSession，也不会自动导入旧 JSON；重新登录一次即可，原有文件可留作旧版使用。
 
-| 表 | 用途 |
-|---|---|
-| `version` | 数据库版本，本工具写 `7` |
-| `sessions` | auth key 与 DC，对应 gotd 的 `session.Storage` |
-| `entities` | peer 的 `access_hash` / 用户名 / 手机号，对应 gotd 的 `peers.Storage`（也就是 Telethon 的实体缓存） |
-| `sent_files`、`update_state` | 本工具不用，建出来只为表结构与 Telethon 一致 |
-| `store_state` | 本工具自用：Telethon 没有放「联系人版本号」的地方 |
-
-两个实现细节：
-
-- **版本号写 7 而不是最新的 8**：Telethon 读到 `7 < CURRENT_VERSION` 会自动 `alter table` 升级，而老版本 Telethon 读到 8 会在解包 `sessions` 行时直接报错——写 7 新老版本都能用。读的时候按列名取（`SELECT dc_id, server_address, port, auth_key`），所以被 Telethon 升级过的库也照样能读。
-- **`entities.id` 用 Telethon 的「带标记 peer id」**：用户 = `+id`、基础群 = `-id`、频道/超级群 = `-1000000000000 - id`（即 TDLib 的编码）。gotd 的 `peers.Key` 用 `users_` / `chats_` / `channel_` 前缀区分类型，两边在这层互转；遇到没见过的前缀直接报错，而不是往共享的库里写一个含义不明的 ID。
-
-所以**格式与 Python 版通用**：把 `<账号标识>.session` 复制成 Python 版用的 `<完整 32 位 md5>.session` 就能接着用（账号标识的算法见 `tools/tool.go` 的 `SessionID`）。文件名仍保留 16 位前缀，是为了两边同时存在时不会互相覆盖。
-
-首次运行会做一次迁移：发现旧的 `<账号标识>.gotd.json`（auth key + DC）与 `<账号标识>.peers.json`（access_hash、手机号映射）就合并进 `sessions` / `entities` 表，**原文件不删**，之后不再读它们。库里已有会话时不会再导入，避免旧文件盖掉更新的登录状态。
+Unix 会话文件为 `0600`，Windows 使用目录继承的 ACL；请在只有自己能访问的目录运行。整个数据库以及 SQLite 临时边车文件都可能含敏感信息，不要共享或提交。
 
 ### peer 解析与缓存（`peers.Storage`）
 
-`-id 1234567890` 这类数字 ID 必须先拿到 `access_hash` 才能调用接口。Telethon 把 entity 存进 session 的 `entities` 表，而 **gotd 的 session 只存 auth key 与 DC**，没有 peer 存储。
+`-id 1234567890` 这类数字 ID 必须先拿到 `access_hash` 才能调用接口。gotd 的认证会话与 peer 缓存是不同的接口。
 
-因此本工具实现了 gotd 的 **`peers.Storage` 接口**（与上面的会话存储是同一个对象），把 access_hash 落进 `entities` 表，解析交给 gotd 的 **`peers.Manager`**：
+因此本工具实现了 gotd 的 **`peers.Storage` 接口**（与上面的会话存储是同一个对象），持久化 peer 的 access_hash，解析交给 gotd 的 **`peers.Manager`**：
 
 工作方式：
 
@@ -294,17 +295,14 @@ gotd 默认不处理 `FLOOD_WAIT`，会直接把 `rpc error code 420: FLOOD_WAIT
 4. 用 `-id @用户名` 解析出的实体同样经 `Manager` 写入存储，后续用数字 ID 调用也能命中；
 5. 凭据失效（`CHANNEL_INVALID` / `CHANNEL_PRIVATE`）时清除该条本地缓存并提示重新运行。
 
-`entities` 表里只有 access_hash、手机号与联系人版本号，不含凭据；它只是缓存，删掉随时能重建（下次重新扫一遍会话列表即可）。**凭据在同一个文件的 `sessions` 表里**（256 字节 auth key），拿它就等于拿到账号，整个 `.session` 已加入 `.gitignore`，不要提交、不要外发。
-
 扫描本身也做了收敛：命中目标立即停止翻页；翻页游标不前进时立即终止（避免重复请求同一页——这是之前的限流诱因）。
 
 ## 已知限制
 
 - 贴纸会跳过（与 Python 版一致），但**网页预览**等其他媒体类型同样跳过。
-- 上传进度与下载进度共用一个进度条实现，多文件顺序上传。
-- **不支持断点续传**：下载失败或中断时会删掉 `.downloading` 临时文件，下次从 0 开始。`ResolveSavePath` 只能做「文件名 + 大小」判重，做不到「接着下」。
-  gotd 的 `downloader` 没有按偏移续传的入口（`reader.offset` 从 0 起、`Builder` 也没有 `WithOffset`），`Stream` 顺序写、`Parallel` 只按绝对偏移落盘但仍从 0 请求全部数据。要做的话分片读取层不用自己写——`gotd/contrib` 的 `tg_io.ChunkSource`（内部即 `upload.getFile{Offset, Limit}` + `precise`）配 `partio.Streamer.StreamAt(ctx, skip, w)` 已经能从任意字节继续（该路径请求不带 `cdn_supported`，是主 DC 单路，也没有分片哈希校验）——代价是失去 CDN 加速、`WithVerify` 校验和 `-threads` 并发，因此暂不引入。
-- 会话文件的**格式**与 Python 版通用，但没实现 `session.TelethonSession`，所以不能直接复用 Python 版的 StringSession（那是另一套纯字符串编码）。
+- 上传进度与下载进度共用一个进度条实现，多文件顺序上传。分片上传和发送消息是两个阶段；发送失败不会自动重传整个文件，也不会删除源文件。当前不保存跨进程上传分片状态。
+- 下载引用过期或失效时，会重新读取原消息；仅当媒体身份和文件大小仍匹配时才用新引用重试。已知大小的完整文档可在本地结束 EOF 探测，图片仍按远端结果判断 EOF。发布前检查实际写入范围，避免把预分配留下的空洞当成下载成功。
+- `download --resume` 仅对已知大小的完整文档生效。它在目标目录保存 `.teledown-*.resume` 记录和对应 `.resume-part` 文件，不预分配；重跑同一下载时先通过主 DC 获取哈希，验证已写的连续前缀，再从对齐后的字节位置续传。成功后会清理这两个文件；不再续传时，可在确认没有下载进程使用它们后手动清理。照片、缩略图与上传不支持跨进程续传；不开启此开关时仍在失败后清理临时文件。
 - 上传视频依赖外部 `ffprobe` 与 `ffmpeg`：无法读取时长或尺寸时按普通文件发送；只缺 `ffmpeg` 时仍保留视频属性。目录上传跳过符号链接和其他非普通文件。
 - 下载完成后通过硬链接把同目录的临时文件发布为最终文件，防止覆盖其他进程刚保存的同名文件；请使用支持硬链接的文件系统（例如 NTFS 或 ext4，不支持 FAT/exFAT）。
 - 缩略图固定取第 0 帧；Python 版同样取第 0 帧，行为一致。
@@ -324,7 +322,7 @@ gotd 默认不处理 `FLOOD_WAIT`，会直接把 `rpc error code 420: FLOOD_WAIT
 | `tools/tqdm.go` | `tools/tqdm.py` | 进度显示 |
 | `tools/tool.go` | `tools/tool.py`（通用部分） | 文件名规则、标题清洗、通配符、会话标识（md5 前 16 位） |
 | `tools/peer.go` | `tools/tool.py`（`get_chat_id` / `get_chat_title` / `parse_user_ids`） | 频道解析（基于 gotd `peers.Manager`） |
-| `tools/sessionstore.go` | Telethon 的 `sessions/sqlite.py` | 会话库：Telethon 同构的 SQLite，同时实现 gotd 的 `session.Storage` 与 `peers.Storage`，并把旧的两个 JSON 迁移进来 |
+| `tools/sessionstore.go` | — | 独立 Go SQLite：实现 gotd 的 `session.Storage` 与 `peers.Storage` |
 | `tools/message.go` | `tools/tool.py`（`get_history_message`） | `--range` 解析与消息遍历 |
 | `tools/media.go` | `tools/tool.py`（`get_file_id` / `get_file_name`） | 媒体信息提取、file_reference 刷新 |
 | `tools/thumbnail.go` | `tools/tool.py`（`get_thumb`） | 视频首帧抽图 |

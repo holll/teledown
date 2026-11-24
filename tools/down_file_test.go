@@ -16,6 +16,7 @@ import (
 
 	"github.com/gotd/td/bin"
 	"github.com/gotd/td/telegram"
+	"github.com/gotd/td/telegram/downloader"
 	"github.com/gotd/td/tg"
 	"github.com/gotd/td/tgerr"
 )
@@ -101,12 +102,11 @@ func TestDownloadOneUsesConfiguredThreads(t *testing.T) {
 				return ctx.Err()
 			}
 		}
-		var chunk []byte
-		if req.Offset < int64(len(data)) {
-			end := min(req.Offset+int64(req.Limit), int64(len(data)))
-			chunk = data[req.Offset:end]
+		if req.Offset >= int64(len(data)) {
+			return fmt.Errorf("不应向服务端探测已知文件的 EOF：%d", req.Offset)
 		}
-		output.(*tg.UploadFileBox).File = &tg.UploadFile{Type: &tg.StorageFileMp4{}, Bytes: chunk}
+		end := min(req.Offset+int64(req.Limit), int64(len(data)))
+		output.(*tg.UploadFileBox).File = &tg.UploadFile{Type: &tg.StorageFileMp4{}, Bytes: data[req.Offset:end]}
 		return nil
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -118,6 +118,137 @@ func TestDownloadOneUsesConfiguredThreads(t *testing.T) {
 	}
 	if got, err := os.ReadFile(target); err != nil || !bytes.Equal(got, data) {
 		t.Fatalf("并发下载内容不一致，长度=%d，错误=%v", len(got), err)
+	}
+}
+
+func TestDownloadOneEOFProbeDependsOnExactSize(t *testing.T) {
+	const partSize = 512 * 1024
+	data := bytes.Repeat([]byte{42}, partSize)
+	for _, tc := range []struct {
+		name     string
+		location tg.InputFileLocationClass
+		size     int64
+		want     int
+	}{
+		{"known document", &tg.InputDocumentFileLocation{ID: 1}, partSize, 1},
+		{"unknown document", &tg.InputDocumentFileLocation{ID: 1}, 0, 2},
+		{"photo", &tg.InputPhotoFileLocation{ID: 1, ThumbSize: "x"}, partSize, 2},
+		{"unknown photo", &tg.InputPhotoFileLocation{ID: 1, ThumbSize: "x"}, 0, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var requests int
+			client := downloadTestClient(func(_ context.Context, input bin.Encoder, output bin.Decoder) error {
+				req, ok := input.(*tg.UploadGetFileRequest)
+				if !ok {
+					return fmt.Errorf("unexpected request %T", input)
+				}
+				requests++
+				if req.Limit != partSize || req.Offset != int64((requests-1)*partSize) {
+					return fmt.Errorf("unexpected request: offset=%d limit=%d", req.Offset, req.Limit)
+				}
+				var chunk []byte
+				if req.Offset == 0 {
+					chunk = data
+				}
+				output.(*tg.UploadFileBox).File = &tg.UploadFile{Type: &tg.StorageFileUnknown{}, Bytes: chunk}
+				return nil
+			})
+			info := &mediaInfo{Name: "media", Size: tc.size, Location: tc.location}
+			target := filepath.Join(t.TempDir(), "media")
+			if err := downloadOne(t.Context(), client, &tg.InputPeerSelf{}, &tg.Message{ID: 1}, info, target, 1); err != nil {
+				t.Fatal(err)
+			}
+			if requests != tc.want {
+				t.Fatalf("sent %d RPCs, want %d", requests, tc.want)
+			}
+			if got, err := os.ReadFile(target); err != nil || !bytes.Equal(got, data) {
+				t.Fatalf("download differs: bytes=%d err=%v", len(got), err)
+			}
+		})
+	}
+}
+
+func TestDownloadTransferKeepsWindowAcrossFilesAndAlignedTail(t *testing.T) {
+	const partSize = 512 * 1024
+	data := bytes.Repeat([]byte{42}, partSize+7)
+	var requests atomic.Int32
+	client := downloadTestClient(func(_ context.Context, input bin.Encoder, output bin.Decoder) error {
+		req, ok := input.(*tg.UploadGetFileRequest)
+		if !ok {
+			return fmt.Errorf("unexpected request %T", input)
+		}
+		if req.Offset < 0 || req.Offset >= int64(len(data)) || req.Offset%partSize != 0 || req.Limit != partSize {
+			return fmt.Errorf("unexpected request: offset=%d limit=%d", req.Offset, req.Limit)
+		}
+		requests.Add(1)
+		end := min(req.Offset+int64(req.Limit), int64(len(data)))
+		output.(*tg.UploadFileBox).File = &tg.UploadFile{Type: &tg.StorageFileUnknown{}, Bytes: data[req.Offset:end]}
+		return nil
+	})
+	root, err := os.OpenRoot(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	transfer := newDownloadTransfer(5)
+	transfer.stats = new(TransferStats)
+	if got := transfer.scheduler.Snapshot().Window; got != 4 {
+		t.Fatalf("starting window = %d, want 4", got)
+	}
+	peer := &tg.InputPeerSelf{}
+	for i := 1; i <= 3; i++ {
+		info := &mediaInfo{Name: "media", Size: int64(len(data)), Location: &tg.InputDocumentFileLocation{ID: int64(i)}}
+		target := fmt.Sprintf("file-%d", i)
+		if err := downloadOneRoot(t.Context(), client, peer, &tg.Message{ID: i}, info, root, target, transfer); err != nil {
+			t.Fatal(err)
+		}
+		if got, err := root.ReadFile(target); err != nil || !bytes.Equal(got, data) {
+			t.Fatalf("download differs: bytes=%d err=%v", len(got), err)
+		}
+	}
+	if got := requests.Load(); got != 6 {
+		t.Fatalf("sent %d RPCs, want 6", got)
+	}
+	if got := transfer.scheduler.Snapshot(); got.Window != 5 || got.InFlight != 0 || got.Waiting != 0 {
+		t.Fatalf("shared scheduler snapshot = %+v, want window 5 and no outstanding work", got)
+	}
+	if window, peak := transfer.stats.window.Load(), transfer.stats.peak.Load(); window != 5 || peak != 5 {
+		t.Fatalf("observed window/peak = %d/%d, want 5/5", window, peak)
+	}
+}
+
+func TestDownloadSinkRejectsHolesAndOverlappingChunks(t *testing.T) {
+	file, err := os.CreateTemp(t.TempDir(), "sink")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	if err := file.Truncate(8); err != nil {
+		t.Fatal(err)
+	}
+	for _, size := range []int64{0, 8} {
+		w := downloadSink{file: file, bar: newProgressBar("media", size), size: size}
+		if err := w.complete(); err == nil {
+			t.Fatal("empty download accepted")
+		}
+		if _, err := w.WriteAt([]byte("gh"), 6); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := w.WriteAt([]byte("ab"), 0); err != nil {
+			t.Fatal(err)
+		}
+		if err := w.complete(); err == nil {
+			t.Fatal("accepted hole in download")
+		}
+		if _, err := w.WriteAt([]byte("bc"), 1); err == nil {
+			t.Fatal("accepted overlapping range")
+		}
+		if _, err := w.WriteAt([]byte("cdef"), 2); err != nil {
+			t.Fatal(err)
+		}
+		if err := w.complete(); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
@@ -134,7 +265,10 @@ func TestDownloadOneFallbackResetsTemporaryFile(t *testing.T) {
 					return nil
 				}
 				fallback = true
-				return tgerr.New(400, "LOCATION_INVALID")
+				// The mock client has no configuration for this CDN DC, so
+				// acquiring its CDN transport fails after the redirect.
+				output.(*tg.UploadFileBox).File = &tg.UploadFileCDNRedirect{DCID: 999}
+				return nil
 			}
 			if req.Offset != 0 {
 				return fmt.Errorf("降级后起始偏移不为零：%d", req.Offset)
@@ -148,7 +282,7 @@ func TestDownloadOneFallbackResetsTemporaryFile(t *testing.T) {
 		return nil
 	})
 	target := filepath.Join(t.TempDir(), "fallback.mp4")
-	info := &mediaInfo{Name: "fallback.mp4", Size: int64(len(data)), Location: &tg.InputDocumentFileLocation{ID: 1}}
+	info := &mediaInfo{Name: "fallback.mp4", Location: &tg.InputDocumentFileLocation{ID: 1}}
 	if err := downloadOne(context.Background(), client, &tg.InputPeerSelf{}, &tg.Message{ID: 1}, info, target, 1); err != nil {
 		t.Fatal(err)
 	}
@@ -157,19 +291,66 @@ func TestDownloadOneFallbackResetsTemporaryFile(t *testing.T) {
 	}
 }
 
-func TestDownloadOneRefreshesExpiredReference(t *testing.T) {
+func TestDownloadDoesNotFallbackOnOriginErrors(t *testing.T) {
+	for _, failure := range []error{tgerr.New(400, "LOCATION_INVALID"), ErrTransferWaitLimit} {
+		t.Run(failure.Error(), func(t *testing.T) {
+			var getFiles, hashes int
+			client := downloadTestClient(func(_ context.Context, req bin.Encoder, _ bin.Decoder) error {
+				switch req.(type) {
+				case *tg.UploadGetFileRequest:
+					getFiles++
+				case *tg.UploadGetFileHashesRequest:
+					hashes++
+				}
+				return failure
+			})
+			target := filepath.Join(t.TempDir(), "media")
+			info := &mediaInfo{Name: "media", Location: &tg.InputDocumentFileLocation{ID: 1}}
+			if err := downloadOne(t.Context(), client, &tg.InputPeerSelf{}, &tg.Message{ID: 1}, info, target, 1); err == nil {
+				t.Fatal("failure lost")
+			}
+			if getFiles != 1 || hashes != 0 {
+				t.Fatalf("unexpected fallback: getFile=%d hashes=%d", getFiles, hashes)
+			}
+		})
+	}
+}
+
+func TestDownloadCDNFallbackRejectsTerminalErrors(t *testing.T) {
+	for _, err := range []error{ErrTransferWaitLimit, downloader.ErrHashMismatch, tgerr.New(420, "FLOOD_WAIT_3"), tgerr.New(400, "FILE_REFERENCE_0_EXPIRED")} {
+		if shouldFallbackDownload(t.Context(), &downloadCDNError{cause: err}) {
+			t.Errorf("terminal CDN error would be retried: %v", err)
+		}
+	}
+	if shouldFallbackDownload(t.Context(), io.ErrShortWrite) {
+		t.Error("local I/O error would be retried")
+	}
+	if !shouldFallbackDownload(t.Context(), &downloadCDNError{cause: io.ErrUnexpectedEOF}) {
+		t.Error("CDN transport error would not be retried")
+	}
+}
+
+func TestDownloadOneRefreshesStaleReference(t *testing.T) {
+	for _, code := range []string{"FILE_REFERENCE_EXPIRED", "FILE_REFERENCE_INVALID"} {
+		t.Run(code, func(t *testing.T) { testDownloadOneRefreshesReference(t, code) })
+	}
+}
+
+func testDownloadOneRefreshesReference(t *testing.T, code string) {
+	t.Helper()
 	data := []byte("refreshed media")
+	var refreshes, staleRequests int
 	client := downloadTestClient(func(_ context.Context, input bin.Encoder, output bin.Decoder) error {
 		switch req := input.(type) {
 		case *tg.UploadGetFileRequest:
 			loc := req.Location.(*tg.InputDocumentFileLocation)
 			if !bytes.Equal(loc.FileReference, []byte("fresh")) {
-				return tgerr.New(400, "FILE_REFERENCE_EXPIRED")
+				staleRequests++
+				return tgerr.New(400, code)
 			}
 			output.(*tg.UploadFileBox).File = &tg.UploadFile{Type: &tg.StorageFileMp4{}, Bytes: data}
-		case *tg.UploadGetFileHashesRequest:
-			return tgerr.New(400, "FILE_REFERENCE_EXPIRED")
 		case *tg.ChannelsGetMessagesRequest:
+			refreshes++
 			output.(*tg.MessagesMessagesBox).Messages = &tg.MessagesChannelMessages{Messages: []tg.MessageClass{
 				&tg.Message{ID: 5, PeerID: &tg.PeerChannel{ChannelID: 7}, Media: &tg.MessageMediaDocument{Document: &tg.Document{ID: 1, Size: int64(len(data)), FileReference: []byte("fresh")}}},
 			}}
@@ -189,6 +370,94 @@ func TestDownloadOneRefreshesExpiredReference(t *testing.T) {
 	}
 	if entries, err := os.ReadDir(dir); err != nil || len(entries) != 1 {
 		t.Fatalf("引用刷新后临时文件未清理：%v，错误=%v", entries, err)
+	}
+	if staleRequests != 1 || refreshes != 1 {
+		t.Fatalf("stale requests=%d refreshes=%d; want exactly one of each", staleRequests, refreshes)
+	}
+}
+
+func TestDownloadRefreshSharesLocationAndKeepsOtherParts(t *testing.T) {
+	const partSize = 512 * 1024
+	data := bytes.Repeat([]byte{17}, 3*partSize)
+	var first, stale, refreshes atomic.Int32
+	bothStale := make(chan struct{})
+	client := downloadTestClient(func(ctx context.Context, in bin.Encoder, out bin.Decoder) error {
+		switch req := in.(type) {
+		case *tg.UploadGetFileRequest:
+			loc := req.Location.(*tg.InputDocumentFileLocation)
+			if req.Offset == 0 {
+				first.Add(1)
+			} else if !bytes.Equal(loc.FileReference, []byte("fresh")) {
+				if stale.Add(1) == 2 {
+					close(bothStale)
+				}
+				select {
+				case <-bothStale:
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+				return tgerr.New(400, "FILE_REFERENCE_0_EXPIRED")
+			}
+			out.(*tg.UploadFileBox).File = &tg.UploadFile{Type: &tg.StorageFileUnknown{}, Bytes: data[req.Offset : req.Offset+int64(req.Limit)]}
+		case *tg.ChannelsGetMessagesRequest:
+			refreshes.Add(1)
+			out.(*tg.MessagesMessagesBox).Messages = &tg.MessagesChannelMessages{Messages: []tg.MessageClass{
+				&tg.Message{ID: 5, PeerID: &tg.PeerChannel{ChannelID: 7}, Media: &tg.MessageMediaDocument{Document: &tg.Document{ID: 1, Size: int64(len(data)), FileReference: []byte("fresh")}}},
+			}}
+		default:
+			return fmt.Errorf("unexpected RPC %T", in)
+		}
+		return nil
+	})
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+	target := filepath.Join(t.TempDir(), "media")
+	info := &mediaInfo{FileID: 1, Size: int64(len(data)), Location: &tg.InputDocumentFileLocation{ID: 1}}
+	if err := downloadOne(ctx, client, &tg.InputPeerChannel{ChannelID: 7}, &tg.Message{ID: 5}, info, target, 3); err != nil {
+		t.Fatal(err)
+	}
+	if first.Load() != 1 || stale.Load() != 2 || refreshes.Load() != 1 {
+		t.Fatalf("first part=%d stale=%d refreshes=%d", first.Load(), stale.Load(), refreshes.Load())
+	}
+	if got, err := os.ReadFile(target); err != nil || !bytes.Equal(got, data) {
+		t.Fatalf("download differs: bytes=%d err=%v", len(got), err)
+	}
+}
+
+func TestDownloadOneRejectsReplacedMedia(t *testing.T) {
+	for name, replacement := range map[string]tg.MessageMediaClass{
+		"new document ID": &tg.MessageMediaDocument{Document: &tg.Document{ID: 2, Size: 10}},
+		"changed size":    &tg.MessageMediaDocument{Document: &tg.Document{ID: 1, Size: 11}},
+		"photo ID alias": &tg.MessageMediaPhoto{Photo: &tg.Photo{ID: 1, Sizes: []tg.PhotoSizeClass{
+			&tg.PhotoSize{Type: "x", W: 1, H: 1, Size: 10},
+		}}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var downloadCount int
+			client := downloadTestClient(func(_ context.Context, input bin.Encoder, output bin.Decoder) error {
+				switch input.(type) {
+				case *tg.UploadGetFileRequest:
+					downloadCount++
+					return tgerr.New(400, "FILE_REFERENCE_INVALID")
+				case *tg.ChannelsGetMessagesRequest:
+					output.(*tg.MessagesMessagesBox).Messages = &tg.MessagesChannelMessages{Messages: []tg.MessageClass{
+						&tg.Message{ID: 5, PeerID: &tg.PeerChannel{ChannelID: 7}, Media: replacement},
+					}}
+					return nil
+				default:
+					return fmt.Errorf("unexpected request %T", input)
+				}
+			})
+			info := &mediaInfo{Name: "media", FileID: 1, Size: 10, Location: &tg.InputDocumentFileLocation{ID: 1}}
+			dir := t.TempDir()
+			err := downloadOne(t.Context(), client, &tg.InputPeerChannel{ChannelID: 7}, &tg.Message{ID: 5}, info, filepath.Join(dir, "media"), 1)
+			if !errors.Is(err, errDownloadMediaChanged) || downloadCount != 1 {
+				t.Fatalf("replaced media not rejected, err=%v download requests=%d", err, downloadCount)
+			}
+			if entries, err := os.ReadDir(dir); err != nil || len(entries) != 0 {
+				t.Fatalf("failed download left files: %v, %v", entries, err)
+			}
+		})
 	}
 }
 
