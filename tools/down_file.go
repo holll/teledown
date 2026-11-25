@@ -4,7 +4,6 @@ package tools
 
 import (
 	"context"
-	"crypto/rand"
 	"errors"
 	"fmt"
 	"io"
@@ -30,6 +29,8 @@ type DownloadOptions struct {
 	// Resume preserves verified download state for full documents with a known size.
 	Resume bool
 	Stats  *TransferStats
+	// CDNWait also applies the main RPC wait policy on raw CDN connections.
+	CDNWait telegram.Middleware
 	// SenderIDs are marked Telegram peer IDs. Nil disables filtering; an empty set matches nobody.
 	SenderIDs map[int64]struct{}
 	// Manager 用于在 access_hash 失效时清除本地缓存，可为 nil。
@@ -53,7 +54,7 @@ func Download(ctx context.Context, client *telegram.Client, peer *Peer, opt Down
 	defer root.Close()
 	channel := safeDownloadComponent(fmt.Sprintf("%s-%d", peer.Title, peer.ID))
 	transfer := newDownloadTransfer(opt.Threads)
-	transfer.resume, transfer.stats = opt.Resume, opt.Stats
+	transfer.resume, transfer.stats, transfer.cdnWait = opt.Resume, opt.Stats, opt.CDNWait
 
 	var (
 		total     int
@@ -102,7 +103,8 @@ func Download(ctx context.Context, client *telegram.Client, peer *Peer, opt Down
 		succeeded++
 		return nil
 	})
-	if err != nil {
+	var missing *MissingMessageIDsError
+	if err != nil && !errors.As(err, &missing) {
 		// 缓存的 access_hash 可能已失效：清掉本地缓存，下次运行会重新解析
 		if tg.IsChannelInvalid(err) || tg.IsChannelPrivate(err) {
 			opt.Manager.ForgetPeer(peer.ID)
@@ -114,9 +116,9 @@ func Download(ctx context.Context, client *telegram.Client, peer *Peer, opt Down
 	fmt.Printf("%s 下载完成：成功 %d，跳过（已存在）%d，失败 %d，命中 %d\n",
 		peer.Title, succeeded, skipped, failed, total)
 	if failed > 0 {
-		return fmt.Errorf("下载失败 %d 个文件（成功 %d，跳过 %d）: %w", failed, succeeded, skipped, firstErr)
+		return errors.Join(err, fmt.Errorf("下载失败 %d 个文件（成功 %d，跳过 %d）: %w", failed, succeeded, skipped, firstErr))
 	}
-	return nil
+	return err
 }
 
 func matchesSender(filter map[int64]struct{}, sender tg.PeerClass) bool {
@@ -156,7 +158,9 @@ func saveMedia(ctx context.Context, client *telegram.Client, root *os.Root, chan
 	if err := ensureDownloadDir(root, channel); err != nil {
 		return false, err
 	}
-	exists, target, err := resolveSavePath(root.Lstat, filepath.Join(channel, name), info.Size)
+	exists, target, err := resolveSavePath(root.Lstat, filepath.Join(channel, name), func(target string, stat os.FileInfo) (bool, error) {
+		return matchesPublishedDownload(ctx, root, target, mediaProofPath(target, info), stat, info.Size)
+	})
 	if err != nil {
 		return false, err
 	}
@@ -188,41 +192,25 @@ func downloadOneRoot(ctx context.Context, client *telegram.Client, peer tg.Input
 		}
 	}
 
-	tmp := filepath.Join(filepath.Dir(target), ".teledown-"+rand.Text()+".downloading")
-	file, err := root.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o600)
-	if err != nil {
-		return fmt.Errorf("创建临时文件失败: %w", err)
-	}
-	defer func() {
-		_ = file.Close()
-		_ = root.Remove(tmp)
-	}()
-	if err := runDownload(ctx, client, info, ref, file, bar, transfer); err != nil {
-		return err
-	}
-	return publishDownload(ctx, root, file, tmp, target, info.Size)
+	return runNonResumeDownload(ctx, root, target, mediaProofPath(target, info), info.Size, root.Link, func(file *os.File) error {
+		return runDownload(ctx, client, info, ref, file, bar, transfer)
+	})
 }
 
-func publishDownload(ctx context.Context, root *os.Root, file *os.File, tmp, target string, size int64) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if size > 0 {
-		written, err := file.Stat()
-		if err != nil {
-			return fmt.Errorf("检查下载大小失败: %w", err)
+func mediaProofPath(target string, info *mediaInfo) string {
+	// References and access hashes may change; the typed media ID and
+	// variant identify the immutable Telegram object being downloaded.
+	switch loc := info.Location.(type) {
+	case *tg.InputDocumentFileLocation:
+		if loc.ID != 0 {
+			return downloadProofPath(target, "document", loc.ID, loc.ThumbSize, info.Size)
 		}
-		if written.Size() != size {
-			return fmt.Errorf("下载大小不符：实际 %d，预期 %d", written.Size(), size)
+	case *tg.InputPhotoFileLocation:
+		if loc.ID != 0 {
+			return downloadProofPath(target, "photo", loc.ID, loc.ThumbSize, info.Size)
 		}
 	}
-	if err := file.Close(); err != nil {
-		return fmt.Errorf("关闭临时文件失败: %w", err)
-	}
-	if err := root.Link(tmp, target); err != nil {
-		return fmt.Errorf("保存下载文件失败（不会覆盖现有文件）: %w", err)
-	}
-	return nil
+	return ""
 }
 
 var errDownloadMediaChanged = errors.New("消息刷新后原媒体已不可用或已被替换")
@@ -240,7 +228,7 @@ type downloadReference struct {
 func newDownloadReference(client *telegram.Client, peer tg.InputPeerClass, messageID int, info *mediaInfo) *downloadReference {
 	return &downloadReference{location: info.Location, fetch: func(ctx context.Context) (tg.InputFileLocationClass, error) {
 		var fresh *tg.Message
-		if err := eachMessageByID(ctx, client.API(), peer, []int{messageID}, func(candidate *tg.Message) error {
+		if _, err := eachMessageByID(ctx, client.API(), peer, []int{messageID}, func(candidate *tg.Message) error {
 			if candidate.ID == messageID {
 				fresh = candidate
 			}
@@ -301,6 +289,7 @@ type downloadTransfer struct {
 	scheduler *downloader.Scheduler
 	resume    bool
 	stats     *TransferStats
+	cdnWait   telegram.Middleware
 }
 
 // Reuse the adaptive window for every file and retry in a download command.
@@ -335,12 +324,20 @@ func tagDownloadCDNError[T any](result T, err error) (T, error) {
 	return result, err
 }
 
-type downloadCDNProvider struct{ downloader.CDNProvider }
+type downloadCDNProvider struct {
+	downloader.CDNProvider
+	wait telegram.Middleware
+}
 
 func (p downloadCDNProvider) CDN(ctx context.Context, dc int, max int64) (downloader.CDN, io.Closer, error) {
 	client, closer, err := p.CDNProvider.CDN(ctx, dc, max)
 	if err != nil {
 		return nil, closer, &downloadCDNError{cause: err}
+	}
+	// gotd's CDN provider returns a tg.Client built directly on its CDN
+	// pool, not on the normal middleware chain.
+	if raw, ok := client.(*tg.Client); ok && p.wait != nil {
+		client = tg.NewClient(p.wait.Handle(raw.Invoker()))
 	}
 	return downloadCDNClient{client}, closer, nil
 }
@@ -377,7 +374,7 @@ func (d downloadTransfer) builder(client *telegram.Client, info *mediaInfo, ref 
 	if direct {
 		builder = client.Downloader().WithAllowCDN(false).Download(client.API(), location)
 	} else {
-		rpc := downloader.WithCDNProvider(downloadCDNMaster{client.API()}, downloadCDNProvider{client.CDNProvider()})
+		rpc := downloader.WithCDNProvider(downloadCDNMaster{client.API()}, downloadCDNProvider{CDNProvider: client.CDNProvider(), wait: d.cdnWait})
 		builder = client.Downloader().Download(rpc, location)
 	}
 	// Only full documents have reliable lengths. In particular, the size of a

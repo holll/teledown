@@ -188,14 +188,32 @@ func ParseDateRange(sinceRaw, untilRaw string) (DateRange, error) {
 	return out, nil
 }
 
+// MissingMessageIDsError lists explicit IDs for which Telegram did not return
+// a normal message belonging to the requested peer.
+type MissingMessageIDsError struct {
+	IDs []int
+}
+
+func (e *MissingMessageIDsError) Error() string {
+	return fmt.Sprintf("未找到可读取的普通消息 ID: %v", e.IDs)
+}
+
 // EachMessage 按消息 ID 升序逐条回调，回调返回错误时立即中断。
+// 对显式 ID，在处理完所有可读取的普通消息之后报告缺失项。
 //
 // since 为消息时间的下界（秒级时间戳，0 表示不限）。历史接口从新到旧返回，
 // 越过下界时停止拉取，再将已收集的消息反向处理，以保证跨页升序。
 func EachMessage(ctx context.Context, api *tg.Client, peer tg.InputPeerClass, r MsgRange, since int, fn func(*tg.Message) error) error {
 	if r.Mode == RangeSingle || r.Mode == RangeList {
 		// 按 ID 拉取不能据日期提前结束，日期过滤由回调负责。
-		return eachMessageByID(ctx, api, peer, r.IDs, fn)
+		missing, err := eachMessageByID(ctx, api, peer, r.IDs, fn)
+		if err != nil {
+			return err
+		}
+		if len(missing) != 0 {
+			return &MissingMessageIDsError{IDs: missing}
+		}
+		return nil
 	}
 
 	var messages []*tg.Message
@@ -221,44 +239,62 @@ func EachMessage(ctx context.Context, api *tg.Client, peer tg.InputPeerClass, r 
 // 必须走 query 包的 GetMessages：它会按 peer 类型分流（频道用 channels.getMessages，
 // 其它用 messages.getMessages）。频道消息 ID 只在频道内唯一，直接调
 // messages.getMessages 拿到的是无关消息——Telethon 的 _IDsIter 在同一处也是这么分流的。
-func eachMessageByID(ctx context.Context, api *tg.Client, peer tg.InputPeerClass, ids []int, fn func(*tg.Message) error) error {
+func eachMessageByID(ctx context.Context, api *tg.Client, peer tg.InputPeerClass, ids []int, fn func(*tg.Message) error) ([]int, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
 	// messages.getMessages 的 ID 不限定对话，必须同时验证返回消息的 peer。
 	// 收藏夹也不能例外：先解析自身 ID，再按普通用户 peer 匹配。
 	target := peer
 	if _, ok := peer.(*tg.InputPeerSelf); ok {
 		users, err := api.UsersGetUsers(ctx, []tg.InputUserClass{&tg.InputUserSelf{}})
 		if err != nil {
-			return fmt.Errorf("获取自身用户 ID 失败: %w", err)
+			return nil, fmt.Errorf("获取自身用户 ID 失败: %w", err)
 		}
 		if len(users) != 1 {
-			return fmt.Errorf("获取自身用户 ID 失败: 返回 %d 个用户", len(users))
+			return nil, fmt.Errorf("获取自身用户 ID 失败: 返回 %d 个用户", len(users))
 		}
 		self, ok := users[0].(*tg.User)
 		if !ok || self.ID <= 0 {
-			return fmt.Errorf("获取自身用户 ID 失败: 无有效用户")
+			return nil, fmt.Errorf("获取自身用户 ID 失败: 无有效用户")
 		}
 		target = &tg.InputPeerUser{UserID: self.ID}
 	}
 
 	raw, err := query.NewQuery(api).Messages().GetMessages(ctx, peer, ids...)
 	if err != nil {
-		return fmt.Errorf("按 ID 拉取消息失败: %w", err)
+		return nil, fmt.Errorf("按 ID 拉取消息失败: %w", err)
+	}
+	pending := make(map[int]struct{}, len(ids))
+	for _, id := range ids {
+		pending[id] = struct{}{}
 	}
 	slices.SortFunc(raw, func(a, b tg.MessageClass) int { return cmp.Compare(a.GetID(), b.GetID()) })
 	for _, m := range raw {
 		msg, ok := m.(*tg.Message)
-		if !ok {
-			// 已删除或无权限的 ID 返回 MessageEmpty，跳过
+		if !ok || !messagePeerMatches(target, msg.PeerID) {
 			continue
 		}
-		if !messagePeerMatches(target, msg.PeerID) {
+		if _, requested := pending[msg.ID]; !requested {
 			continue
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
 		if err := fn(msg); err != nil {
-			return err
+			return nil, err
 		}
+		delete(pending, msg.ID)
 	}
-	return nil
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	var missing []int
+	for id := range pending {
+		missing = append(missing, id)
+	}
+	slices.Sort(missing)
+	return missing, nil
 }
 
 func messagePeerMatches(target tg.InputPeerClass, actual tg.PeerClass) bool {

@@ -17,7 +17,6 @@ import (
 
 	contribauth "github.com/gotd/contrib/auth"
 	"github.com/gotd/contrib/auth/localization"
-	"github.com/gotd/contrib/auth/terminal"
 	"github.com/gotd/td/clock"
 	"github.com/gotd/td/session"
 	"github.com/gotd/td/telegram"
@@ -32,12 +31,6 @@ import (
 	"golang.org/x/text/message"
 
 	"rsc.io/qr"
-)
-
-// 登录流程的重试参数：与 Telethon 的 send_code_request 重试策略一致（最多 3 次）。
-const (
-	authMaxAttempts  = 3
-	authRestartDelay = 2 * time.Second
 )
 
 // 商品名取自 Google Play 公开设备清单。保留顺序，避免既有 ID 换型号。
@@ -61,7 +54,7 @@ func androidDeviceModel(deviceID string) string {
 //	socks5://user:pass@host:port
 //	user:pass@host:port
 //	host:port
-func NewTelegramClient(cfg *Config, proxyOverride, deviceID string, store session.Storage, updates telegram.UpdateHandler) (*telegram.Client, error) {
+func NewTelegramClient(cfg *Config, proxyOverride, deviceID string, store session.Storage, updates telegram.UpdateHandler, waitPolicy telegram.Middleware) (*telegram.Client, error) {
 	opts := telegram.Options{
 		SessionStorage: store,
 		UpdateHandler:  updates,
@@ -70,7 +63,7 @@ func NewTelegramClient(cfg *Config, proxyOverride, deviceID string, store sessio
 		// 因此 bot_token 登录时显式关闭，继续走主 DC。
 		AllowCDN: cfg.BotToken == "",
 		// 自动消化 FLOOD_WAIT：gotd 默认不处理，会把 420 错误直接抛出。
-		Middlewares: []telegram.Middleware{&floodWaitMiddleware{}},
+		Middlewares: []telegram.Middleware{waitPolicy},
 	}
 
 	// 仅设置设备显示资料，继续使用配置中的应用凭据，不冒充 Telegram 官方客户端。
@@ -159,42 +152,19 @@ func Authorize(ctx context.Context, client *telegram.Client, cfg *Config) error 
 		return nil
 	}
 
-	flow := authFlow(cfg)
-
-	// AUTH_RESTART 表示服务端要求从「发送验证码」这一步重来（上一次流程中断、
-	// 或会话里留着未完成的登录状态时常见）。Telethon 的做法也是重试整个流程、最多 3 次。
-	var lastErr error
-	for attempt := 1; attempt <= authMaxAttempts; attempt++ {
-		err := client.Auth().IfNecessary(ctx, flow)
-		if err == nil {
-			return nil
-		}
-		lastErr = err
-
-		switch {
-		case tg.IsPasswordHashInvalid(err):
-			return fmt.Errorf("两步验证密码不正确：请检查 .env 里 password 的值（%w）", err)
-		case isSignUpRequired(err):
-			// 服务端要求注册新账号（手机号不对、或该号还没注册过）。
-			// 本工具只登录已有账号，不代用户走注册流程。
-			return fmt.Errorf("该手机号在 Telegram 上没有可用账号（服务端要求先注册/接受条款）：本工具只支持已注册账号，请确认 .env 里的 phone 是否正确（%w）", err)
-		case tg.IsAuthRestart(err) && attempt < authMaxAttempts:
-			fmt.Printf("服务端要求重新开始登录流程（AUTH_RESTART），%s 后重试（第 %d/%d 次）\n",
-				authRestartDelay, attempt+1, authMaxAttempts)
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(authRestartDelay):
-			}
-		case tg.IsAuthRestart(err):
-			// 重试仍失败：多半是会话文件里残留了未完成的登录状态
-			return fmt.Errorf("登录流程反复被要求重启（AUTH_RESTART）：请删除会话文件 %s 后重试（%w）",
-				cfg.SessionPath(), err)
-		default:
-			return fmt.Errorf("登录失败: %w", err)
-		}
+	err = authFlow(cfg).Run(ctx, client.Auth())
+	switch {
+	case err == nil:
+		return nil
+	case tg.IsPasswordHashInvalid(err):
+		return fmt.Errorf("两步验证密码不正确：请检查 .env 里 password 的值（%w）", err)
+	case isSignUpRequired(err):
+		return fmt.Errorf("该手机号在 Telegram 上没有可用账号（服务端要求先注册/接受条款）：本工具只支持已注册账号，请确认 .env 里的 phone 是否正确（%w）", err)
+	case tg.IsAuthRestart(err):
+		return fmt.Errorf("Telegram 要求重新开始登录（AUTH_RESTART）；本工具不会自动再次发码。可使用 info --qr 登录，无需删除已有会话库（%w）", err)
+	default:
+		return fmt.Errorf("登录失败: %w", err)
 	}
-	return fmt.Errorf("登录失败: %w", lastErr)
 }
 
 type qrServerClock struct {
@@ -272,13 +242,17 @@ func authorizeQR(ctx context.Context, client *telegram.Client, cfg *Config, logg
 	return nil
 }
 
-func readQRPassword(ctx context.Context) (password string, err error) {
+func readQRPassword(ctx context.Context) (string, error) {
+	return readTerminalLoginSecret(ctx, "该账号启用了两步验证，请输入密码（不回显）: ")
+}
+
+func readTerminalLoginSecret(ctx context.Context, prompt string) (password string, err error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
 	fd := int(os.Stdin.Fd())
 	if !term.IsTerminal(fd) {
-		return "", errors.New("扫码后的两步验证需要直接在终端输入密码，不支持重定向 stdin")
+		return "", errors.New("此登录输入需要直接在终端中进行，不支持重定向 stdin")
 	}
 	state, err := term.MakeRaw(fd)
 	if err != nil {
@@ -292,7 +266,7 @@ func readQRPassword(ctx context.Context) (password string, err error) {
 		io.Reader
 		io.Writer
 	}{qrPasswordReader{ctx: ctx, input: os.Stdin}, colorable.NewColorableStderr()}, "")
-	password, err = terminal.ReadPassword("该账号启用了两步验证，请输入密码（不回显）: ")
+	password, err = terminal.ReadPassword(prompt)
 	if errors.Is(err, io.EOF) {
 		return "", errInterrupted
 	}
@@ -384,10 +358,10 @@ func showLoginQR(w io.Writer, token qrlogin.Token, width int) error {
 }
 
 // configCredentials 提供认证流程里的手机号与两步验证密码。
-// 交互部分（验证码读取、位数校验、条款与注册流程）由 contrib/auth/terminal 负责。
+// 验证码与密码输入由 CLI 负责；条款和注册由 contrib/auth 拒绝。
 type configCredentials struct {
 	cfg          *Config
-	readPassword func() (string, error)
+	readPassword func(context.Context) (string, error)
 }
 
 var _ contribauth.Credentials = configCredentials{}
@@ -416,7 +390,7 @@ func (c configCredentials) Password(ctx context.Context) (string, error) {
 	if c.readPassword == nil {
 		return "", errors.New("未配置两步验证密码输入")
 	}
-	value, err := c.readPassword()
+	value, err := c.readPassword(ctx)
 	if ctx.Err() != nil {
 		return "", ctx.Err()
 	}
@@ -425,42 +399,103 @@ func (c configCredentials) Password(ctx context.Context) (string, error) {
 
 // authFlow 组装登录流程：
 //   - 手机号与两步验证密码取 .env（configCredentials）；
-//   - 验证码的提示、读取与位数校验用 contrib/auth/terminal（tty 检测、管道回退都是现成的）；
+//   - 验证码和两步密码使用可取消的输入，终端不回显；
 //   - 条款确认与注册流程用 contrib/auth 的 NoSignUp 明确拒绝。
-//
-// 不能直接把 terminal.OS() 当 Ask 传：它自带条款 Y/N 与注册（问名/姓）流程，
-// 手机号写错时会把号码往注册流程上带。本工具只用于已登录账号的下载/上传。
 func authFlow(cfg *Config) auth.Flow {
-	var input io.Reader = os.Stdin
-	readPassword := func() (string, error) {
-		return promptSecret("该账号启用了两步验证，请输入密码（不回显）: ")
-	}
+	read := readTerminalLoginSecret
 	if !term.IsTerminal(int(os.Stdin.Fd())) {
-		// The terminal helper buffers input too. Share the same reader so any
-		// password prefetched while reading the code remains available.
-		input = bufio.NewReader(os.Stdin)
-		readPassword = func() (string, error) {
-			fmt.Print("该账号启用了两步验证，请输入密码: ")
-			return readSecretLine(input)
+		read = pipedLoginReader(os.Stdin, os.Stderr)
+	}
+	printer := chinesePrinter()
+	code := loginCodePrompt(os.Stderr, func(ctx context.Context, sent *tg.AuthSentCode) (string, error) {
+		return readLoginCode(ctx, sent, read, os.Stderr, printer)
+	})
+	ask := contribauth.BuildAsk(code, contribauth.NoSignUp())
+	credentials := configCredentials{cfg: cfg, readPassword: func(ctx context.Context) (string, error) {
+		return read(ctx, "该账号启用了两步验证，请输入密码: ")
+	}}
+	return auth.NewFlow(contribauth.Build(credentials, ask), auth.SendCodeOptions{})
+}
+
+func readLoginCode(ctx context.Context, sent *tg.AuthSentCode, read func(context.Context, string) (string, error), out io.Writer, printer *message.Printer) (string, error) {
+	for {
+		value, err := read(ctx, printer.Sprintf(localization.CodeDialogPrompt)+": ")
+		if err != nil {
+			return "", err
+		}
+		value = strings.TrimSpace(value)
+		if sized, ok := sent.Type.(interface{ GetLength() int }); ok && sized.GetLength() > 0 && len(value) != sized.GetLength() {
+			if _, err := fmt.Fprintln(out, printer.Sprintf(localization.CodeInvalidLength, sized.GetLength())); err != nil {
+				return "", err
+			}
+			continue
+		}
+		if value != "" {
+			return value, nil
+		}
+		if _, err := fmt.Fprintln(out, "验证码不能为空"); err != nil {
+			return "", err
 		}
 	}
-	termAuth := terminal.New(input, os.Stdout).WithPrinter(chinesePrinter())
-	code := auth.CodeAuthenticatorFunc(func(ctx context.Context, sent *tg.AuthSentCode) (string, error) {
+}
+
+func pipedLoginReader(in io.Reader, out io.Writer) func(context.Context, string) (string, error) {
+	// A flow never calls read again after cancellation. Keep one buffer for
+	// both steps so a prefetched password is not lost.
+	input := bufio.NewReader(in)
+	return func(ctx context.Context, prompt string) (string, error) {
 		if err := ctx.Err(); err != nil {
 			return "", err
 		}
-		printLoginCodeDelivery(os.Stderr, sent)
-		value, err := termAuth.Code(ctx, sent)
+		if _, err := io.WriteString(out, prompt); err != nil {
+			return "", err
+		}
+		type result struct {
+			line string
+			err  error
+		}
+		done := make(chan result, 1)
+		go func() {
+			line, err := readSecretLine(input)
+			done <- result{line, err}
+		}()
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case res := <-done:
+			return res.line, res.err
+		}
+	}
+}
+
+func loginCodePrompt(w io.Writer, read auth.CodeAuthenticatorFunc) auth.CodeAuthenticatorFunc {
+	return func(ctx context.Context, sent *tg.AuthSentCode) (string, error) {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		printLoginCodeDelivery(w, sent)
+		if sent == nil || sent.Type == nil {
+			return "", errors.New("Telegram 未返回有效的验证码渠道；可使用 info --qr 登录")
+		}
+		switch sent.Type.(type) {
+		case *tg.AuthSentCodeTypeApp, *tg.AuthSentCodeTypeSMS, *tg.AuthSentCodeTypeSMSWord,
+			*tg.AuthSentCodeTypeSMSPhrase, *tg.AuthSentCodeTypeCall:
+			// These channels accept an ordinary phone_code on auth.signIn.
+		default:
+			return "", errors.New("当前登录渠道不能通过本工具的普通验证码流程完成；请使用 info --qr 登录，或在官方客户端完成所需验证")
+		}
+		value, err := read(ctx, sent)
 		if ctx.Err() != nil {
 			return "", ctx.Err()
 		}
 		return value, err
-	})
-	ask := contribauth.BuildAsk(code, contribauth.NoSignUp())
-	return auth.NewFlow(contribauth.Build(configCredentials{cfg: cfg, readPassword: readPassword}, ask), auth.SendCodeOptions{})
+	}
 }
 
 func printLoginCodeDelivery(w io.Writer, sent *tg.AuthSentCode) {
+	if sent == nil || sent.Type == nil {
+		return
+	}
 	// 只输出固定类型名和非敏感元数据，不打印 RPC 对象或投递地址。
 	channel := sent.Type.TypeName()
 	switch sent.Type.(type) {
@@ -469,11 +504,17 @@ func printLoginCodeDelivery(w io.Writer, sent *tg.AuthSentCode) {
 	case *tg.AuthSentCodeTypeSMS, *tg.AuthSentCodeTypeSMSWord, *tg.AuthSentCodeTypeSMSPhrase:
 		channel += "，请查看手机短信"
 	case *tg.AuthSentCodeTypeEmailCode:
-		channel += "，请查看登录邮箱及垃圾邮件文件夹"
-	case *tg.AuthSentCodeTypeCall, *tg.AuthSentCodeTypeFlashCall, *tg.AuthSentCodeTypeMissedCall:
-		channel += "，请留意电话或未接来电"
+		channel += "，请查看登录邮箱；邮箱验证码需要单独的邮箱验证流程"
+	case *tg.AuthSentCodeTypeCall:
+		channel += "，请留意电话播报的验证码"
+	case *tg.AuthSentCodeTypeFlashCall, *tg.AuthSentCodeTypeMissedCall:
+		channel += "，服务端要求以拨入电话或未接来电验证"
 	case *tg.AuthSentCodeTypeSetUpEmailRequired:
-		channel += "，服务端要求先设置登录邮箱"
+		channel += "，服务端要求先设置登录邮箱，尚未发送登录码"
+	case *tg.AuthSentCodeTypeFirebaseSMS:
+		channel += "，服务端要求移动端先完成验证，不能视为短信已发出"
+	case *tg.AuthSentCodeTypeFragmentSMS:
+		channel += "，服务端要求通过 Fragment 获取验证码"
 	}
 	fmt.Fprintf(w, "Telegram 返回的验证码投递类型：%s\n", channel)
 	if code, ok := sent.Type.(interface{ GetLength() int }); ok && code.GetLength() > 0 {
@@ -516,23 +557,6 @@ func chinesePrinter() *message.Printer {
 	must(b.SetString(zh, localization.FirstNameDialogPrompt, "名"))
 	must(b.SetString(zh, localization.SecondNameDialogPrompt, "姓"))
 	return message.NewPrinter(zh, message.Catalog(b))
-}
-
-// promptSecret 读取不回显的敏感输入；非终端环境（如管道）退回普通读取。
-//
-// 两步验证密码不走 contrib 的 Terminal：那边用普通 ReadLine，会把密码显示在屏幕上。
-func promptSecret(prompt string) (string, error) {
-	fmt.Print(prompt)
-	fd := int(os.Stdin.Fd())
-	if term.IsTerminal(fd) {
-		raw, err := term.ReadPassword(fd)
-		fmt.Println()
-		if err != nil {
-			return "", err
-		}
-		return string(raw), nil
-	}
-	return readSecretLine(os.Stdin)
 }
 
 func readSecretLine(input io.Reader) (string, error) {

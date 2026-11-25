@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"io"
@@ -17,6 +16,27 @@ import (
 	"github.com/gotd/td/telegram/auth/qrlogin"
 	"github.com/gotd/td/tg"
 )
+
+func TestTransferFlagsFailBeforeOpeningConfig(t *testing.T) {
+	cases := []struct {
+		name string
+		run  func([]string) error
+		args []string
+		want string
+	}{
+		{"download threads", runDownloadCommand, []string{"-id", "1234", "-threads", "65"}, "-threads"},
+		{"upload threads", runUploadCommand, []string{"-path", "input.bin", "-threads", "0"}, "-threads"},
+		{"download wildcard", runDownloadCommand, []string{"-id", "1234", "--prefix", "*.mp4;abc["}, "--prefix"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			args := append(tc.args, "-c", filepath.Join(t.TempDir(), "does-not-exist.env"))
+			if err := tc.run(args); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("got %v, want validation error for %q", err, tc.want)
+			}
+		})
+	}
+}
 
 // 只覆盖不触发终端输入的分支：配置了值就必须直接用配置，不能再去提示用户。
 func TestConfigCredentialsUsesConfiguredValues(t *testing.T) {
@@ -227,6 +247,51 @@ func TestLoginCodeDeliveryDoesNotExposeEmailOrMissingTimeout(t *testing.T) {
 	if !strings.Contains(got, "请查看登录邮箱") || !strings.Contains(got, "未提供重发渠道") ||
 		strings.Contains(got, emailPattern) || strings.Contains(got, "服务端等待时间") {
 		t.Errorf("邮箱诊断不符合预期：%q", got)
+	}
+}
+
+func TestLoginCodePromptOnlyReadsSupportedChannels(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		typ  tg.AuthSentCodeTypeClass
+		hint string
+		read bool
+	}{
+		{"app", &tg.AuthSentCodeTypeApp{Length: 5}, "不是短信", true},
+		{"sms", &tg.AuthSentCodeTypeSMS{Length: 5}, "手机短信", true},
+		{"sms_word", &tg.AuthSentCodeTypeSMSWord{}, "手机短信", true},
+		{"sms_phrase", &tg.AuthSentCodeTypeSMSPhrase{}, "手机短信", true},
+		{"call", &tg.AuthSentCodeTypeCall{Length: 5}, "电话播报", true},
+		{"email", &tg.AuthSentCodeTypeEmailCode{EmailPattern: "private-address"}, "单独的邮箱验证流程", false},
+		{"setup_email", &tg.AuthSentCodeTypeSetUpEmailRequired{}, "尚未发送登录码", false},
+		{"firebase", &tg.AuthSentCodeTypeFirebaseSMS{}, "不能视为短信已发出", false},
+		{"fragment", &tg.AuthSentCodeTypeFragmentSMS{}, "Fragment", false},
+		{"flash_call", &tg.AuthSentCodeTypeFlashCall{}, "拨入电话", false},
+		{"missed_call", &tg.AuthSentCodeTypeMissedCall{}, "未接来电", false},
+		{"missing_type", nil, "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var stderr strings.Builder
+			called := false
+			prompt := loginCodePrompt(&stderr, func(context.Context, *tg.AuthSentCode) (string, error) {
+				called = true
+				if !strings.Contains(stderr.String(), tc.hint) {
+					t.Error("应先显示投递渠道再读取输入")
+				}
+				return "login-secret", nil
+			})
+			code, err := prompt(t.Context(), &tg.AuthSentCode{Type: tc.typ, PhoneCodeHash: "private-hash"})
+			if tc.read {
+				if !called || code != "login-secret" || err != nil {
+					t.Fatalf("应读取验证码：called=%v err=%v", called, err)
+				}
+			} else if called || code != "" || err == nil || !strings.Contains(err.Error(), "info --qr") {
+				t.Fatalf("应停止输入并提示扫码：called=%v err=%v", called, err)
+			}
+			if got := stderr.String(); !strings.Contains(got, tc.hint) || strings.Contains(got, "private-") || strings.Contains(got, "login-secret") {
+				t.Errorf("投递提示不符合预期：%q", got)
+			}
+		})
 	}
 }
 
@@ -443,13 +508,39 @@ func TestReadSecretLinePreservesSignificantSpaceAndEOF(t *testing.T) {
 }
 
 func TestPipedCodeAndPasswordShareReader(t *testing.T) {
-	input := bufio.NewReader(strings.NewReader("1234\n  secret  "))
-	term := terminal.New(input, io.Discard)
-	code, err := term.Code(context.Background(), &tg.AuthSentCode{Type: &tg.AuthSentCodeTypeApp{Length: 4}})
+	read := pipedLoginReader(strings.NewReader("12\n1234\n  secret  "), io.Discard)
+	code, err := readLoginCode(t.Context(), &tg.AuthSentCode{Type: &tg.AuthSentCodeTypeApp{Length: 4}}, read, io.Discard, chinesePrinter())
 	if err != nil || code != "1234" {
 		t.Fatalf("Code = %q, %v", code, err)
 	}
-	if password, err := readSecretLine(input); err != nil || password != "  secret  " {
+	if password, err := read(t.Context(), "password: "); err != nil || password != "  secret  " {
 		t.Fatalf("password = %q, %v", password, err)
+	}
+}
+
+func TestPipedLoginDoesNotWaitForBlockedInputAfterCancel(t *testing.T) {
+	in, out := io.Pipe()
+	defer in.Close()
+	defer out.Close()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	read := pipedLoginReader(in, io.Discard)
+	done := make(chan error, 1)
+	go func() {
+		_, err := read(ctx, "code: ")
+		done <- err
+	}()
+	// Sending a partial line ensures the read started and waits for more data.
+	if _, err := io.WriteString(out, "12"); err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("read error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("the login read did not observe cancellation")
 	}
 }

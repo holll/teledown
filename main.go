@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -24,8 +25,9 @@ import (
 // infoTimeout 限制 info 命令的连接与登录耗时：代理不可达时 gotd 会持续重连，
 // 不加时限会让「快速自检」变成无限等待。
 const (
-	infoTimeout = 60 * time.Second
-	qrTimeout   = 3 * time.Minute
+	infoTimeout        = 60 * time.Second
+	qrTimeout          = 3 * time.Minute
+	maxTransferThreads = 64
 )
 
 var errInterrupted = errors.New("收到退出信号，操作已中止。")
@@ -82,7 +84,7 @@ func usage() {
   --proxy <地址>  SOCKS5 代理，格式 socks5://user:pass@host:port 或 host:port
 
 download / upload 额外参数:
-  -threads <n>  分片并发上限：下载默认 4，Premium 默认 8；上传默认 4
+  -threads <n>  分片并发上限（1–64）：下载默认 4，Premium 默认 8；上传默认 4
   --transfer-stats  在 stderr 输出传输诊断
   --resume          仅 download：启用完整文档的校验续传
 
@@ -132,7 +134,7 @@ func runInfoCommand(args []string) error {
 	if *scanQR {
 		timeout = qrTimeout
 	}
-	return withClient(*config, *proxyAddr, timeout, *scanQR, func(ctx context.Context, client *telegram.Client, cfg *Config, _ *tools.SessionStore) error {
+	return withClient(*config, *proxyAddr, timeout, *scanQR, nil, func(ctx context.Context, client *telegram.Client, cfg *Config, _ *tools.SessionStore) error {
 		return showInfo(ctx, client, cfg, *scanQR)
 	})
 }
@@ -144,7 +146,7 @@ func showInfo(ctx context.Context, client *telegram.Client, cfg *Config, scanQR 
 		return fmt.Errorf("获取账号信息失败: %w", err)
 	}
 
-	loginMethod := "手机号 " + cfg.Phone
+	loginMethod := "手机号"
 	if cfg.BotToken != "" {
 		loginMethod = "机器人 Token"
 	} else if scanQR {
@@ -194,10 +196,15 @@ func runDownloadCommand(args []string) error {
 	if *channelID = strings.TrimSpace(*channelID); *channelID == "" {
 		return fmt.Errorf("必须指定 -id")
 	}
-	if *threads <= 0 {
-		return fmt.Errorf("-threads 必须大于 0")
+	if *threads < 1 || *threads > maxTransferThreads {
+		return fmt.Errorf("-threads 必须在 1 至 %d 之间", maxTransferThreads)
 	}
 
+	for pattern := range strings.SplitSeq(*prefix, ";") {
+		if _, err := filepath.Match(strings.TrimSpace(pattern), ""); err != nil {
+			return fmt.Errorf("--prefix 通配符无效 %q: %w", pattern, err)
+		}
+	}
 	msgRange, err := tools.ParseRange(*rangeArg)
 	if err != nil {
 		return err
@@ -214,7 +221,8 @@ func runDownloadCommand(args []string) error {
 		stats = new(tools.TransferStats)
 		defer stats.Report(os.Stderr)
 	}
-	return withClient(*config, *proxyAddr, 0, false, func(ctx context.Context, client *telegram.Client, cfg *Config, store *tools.SessionStore) error {
+	waitPolicy := new(floodWaitMiddleware)
+	return withClient(*config, *proxyAddr, 0, false, waitPolicy, func(ctx context.Context, client *telegram.Client, cfg *Config, store *tools.SessionStore) error {
 		ctx = tools.WithTransferStats(ctx, stats)
 		workerLimit, profileErr := downloadThreadLimit(ctx, *threads, threadsExplicit, cfg.BotToken != "", func(ctx context.Context) (bool, error) {
 			me, err := client.Self(ctx)
@@ -244,6 +252,7 @@ func runDownloadCommand(args []string) error {
 			Manager:  manager,
 			Resume:   *resume,
 			Stats:    stats,
+			CDNWait:  waitPolicy,
 		})
 	})
 }
@@ -266,8 +275,8 @@ func runUploadCommand(args []string) error {
 	if *channelID = strings.TrimSpace(*channelID); *channelID == "" {
 		*channelID = "me"
 	}
-	if *threads <= 0 {
-		return fmt.Errorf("-threads 必须大于 0")
+	if *threads < 1 || *threads > maxTransferThreads {
+		return fmt.Errorf("-threads 必须在 1 至 %d 之间", maxTransferThreads)
 	}
 	var deleteFlag bool
 	switch strings.ToUpper(strings.TrimSpace(*deleteAfter)) {
@@ -283,7 +292,7 @@ func runUploadCommand(args []string) error {
 		stats = new(tools.TransferStats)
 		defer stats.Report(os.Stderr)
 	}
-	return withClient(*config, *proxyAddr, 0, false, func(ctx context.Context, client *telegram.Client, cfg *Config, store *tools.SessionStore) error {
+	return withClient(*config, *proxyAddr, 0, false, nil, func(ctx context.Context, client *telegram.Client, cfg *Config, store *tools.SessionStore) error {
 		ctx = tools.WithTransferStats(ctx, stats)
 		peer, err := tools.NewPeerManager(client.API(), store).Resolve(ctx, *channelID)
 		if err != nil {
@@ -309,8 +318,12 @@ func withClient(
 	configPath, proxyAddr string,
 	timeout time.Duration,
 	scanQR bool,
+	waitPolicy telegram.Middleware,
 	fn func(ctx context.Context, client *telegram.Client, cfg *Config, store *tools.SessionStore) error,
 ) error {
+	if waitPolicy == nil {
+		waitPolicy = new(floodWaitMiddleware)
+	}
 	cfg, err := LoadConfig(configPath)
 	if err != nil {
 		return err
@@ -350,7 +363,7 @@ func withClient(
 			loggedIn = watchQRLogin(dispatcher, os.Stderr)
 			updates = dispatcher
 		}
-		client, err := NewTelegramClient(cfg, proxyAddr, deviceID, storage, updates)
+		client, err := NewTelegramClient(cfg, proxyAddr, deviceID, storage, updates, waitPolicy)
 		if err != nil {
 			return err
 		}

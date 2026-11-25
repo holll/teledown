@@ -83,30 +83,22 @@ func TestResolveSavePath(t *testing.T) {
 		t.Errorf("文件不存在时应返回原路径，得到 exists=%v path=%q", exists, got)
 	}
 
-	// 同名同大小 -> 视为已下载
+	// 同名同大小仍是重名，不是同一份媒体的证据。
 	if err := os.WriteFile(target, make([]byte, 100), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if exists, _ := ResolveSavePath(target, 100); !exists {
-		t.Error("同名同大小应判定为已存在")
+	second := filepath.Join(dir, "video(2).mp4")
+	for _, size := range []int64{100, 200} {
+		if exists, got := ResolveSavePath(target, size); exists || got != second {
+			t.Errorf("size=%d: exists=%v path=%q, want %q", size, exists, got, second)
+		}
 	}
-
-	// 同名不同大小 -> 加序号
-	if exists, got := ResolveSavePath(target, 200); exists || got != filepath.Join(dir, "video(2).mp4") {
-		t.Errorf("同名不同大小应加序号，得到 exists=%v path=%q", exists, got)
-	}
-
-	// (2) 也被占用且大小不同 -> (3)
-	if err := os.WriteFile(filepath.Join(dir, "video(2).mp4"), make([]byte, 50), 0o644); err != nil {
+	if err := os.WriteFile(second, make([]byte, 50), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if exists, got := ResolveSavePath(target, 200); exists || got != filepath.Join(dir, "video(3).mp4") {
-		t.Errorf("应继续顺延到 (3)，得到 exists=%v path=%q", exists, got)
-	}
-
-	// (2) 大小相同 -> 判定已存在
-	if exists, _ := ResolveSavePath(target, 50); !exists {
-		t.Error("序号文件大小相同应判定为已存在")
+	third := filepath.Join(dir, "video(3).mp4")
+	if exists, got := ResolveSavePath(target, 50); exists || got != third {
+		t.Errorf("exists=%v path=%q, want %q", exists, got, third)
 	}
 }
 
@@ -137,7 +129,7 @@ func TestMatchWildcardCaseFolding(t *testing.T) {
 	cases := []struct{ pattern, name string }{
 		{"*.MP4", "a.mp4"},
 		{"*.mp4", "A.MP4"},
-		{"第*集*", "第01集 上.MP4"},
+		{"第*集*.mp4", "第01集 上.MP4"},
 	}
 	for _, c := range cases {
 		if runtime.GOOS == "windows" {

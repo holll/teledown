@@ -15,6 +15,7 @@ import (
 
 	"github.com/gotd/td/bin"
 	"github.com/gotd/td/tg"
+	"github.com/gotd/td/tgerr"
 )
 
 func TestUploadPartRetryClient(t *testing.T) {
@@ -242,6 +243,109 @@ func TestUploadDoesNotReplayOnSendFailure(t *testing.T) {
 	}
 }
 
+func TestUploadMockFileOutcomes(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		content    string
+		partErr    error
+		mediaErr   error
+		cancel     bool
+		replace    bool
+		wantStatus uploadStatus
+		wantParts  int
+		wantSends  int
+	}{
+		{name: "empty", wantStatus: uploadFailed},
+		{name: "part unavailable", content: "hello", partErr: errors.New("unavailable"), wantStatus: uploadFailed, wantParts: 1},
+		{name: "server rejection", content: "hello", mediaErr: tgerr.New(400, "MEDIA_INVALID"), wantStatus: uploadFailed, wantParts: 1, wantSends: 1},
+		{name: "server error", content: "hello", mediaErr: tgerr.New(500, "RPC_CALL_FAIL"), wantStatus: uploadUnknown, wantParts: 1, wantSends: 1},
+		{name: "duplicate random ID", content: "hello", mediaErr: tgerr.New(400, "RANDOM_ID_DUPLICATE"), wantStatus: uploadUnknown, wantParts: 1, wantSends: 1},
+		{name: "canceled during submit", content: "hello", cancel: true, wantStatus: uploadUnknown, wantParts: 1, wantSends: 1},
+		{name: "confirmed unchanged", content: "hello", wantStatus: uploadSent, wantParts: 1, wantSends: 1},
+		{name: "confirmed replacement", content: "hello", replace: true, wantStatus: uploadSent, wantParts: 1, wantSends: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "data.txt")
+			writeUploadTestSource(t, path, tc.content)
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			parts, sends := 0, 0
+			api := tg.NewClient(peerTestInvoker(func(_ context.Context, in bin.Encoder, out bin.Decoder) error {
+				switch req := in.(type) {
+				case *tg.UploadSaveFilePartRequest:
+					parts++
+					if string(req.Bytes) != tc.content {
+						t.Fatalf("uploaded %q, want %q", req.Bytes, tc.content)
+					}
+					out.(*tg.BoolBox).Bool = &tg.BoolTrue{}
+					return tc.partErr
+				case *tg.MessagesSendMediaRequest:
+					sends++
+					if tc.replace {
+						if err := os.Rename(path, path+".original"); err != nil {
+							t.Fatal(err)
+						}
+						writeUploadTestSource(t, path, "replacement")
+					}
+					if tc.cancel {
+						cancel()
+						return context.Canceled
+					}
+					out.(*tg.UpdatesBox).Updates = &tg.UpdatesTooLong{}
+					return tc.mediaErr
+				default:
+					t.Fatalf("unexpected RPC %T", in)
+					return nil
+				}
+			}))
+			result := uploadOne(ctx, api, &tg.InputPeerSelf{}, path, UploadOptions{Threads: 1, DeleteAfter: true}, defaultUploadParts)
+			if result.status != tc.wantStatus || parts != tc.wantParts || sends != tc.wantSends {
+				t.Fatalf("status %v (%v), parts %d, sends %d; want %v, %d, %d", result.status, result.err, parts, sends, tc.wantStatus, tc.wantParts, tc.wantSends)
+			}
+			if tc.cancel && !errors.Is(result.err, context.Canceled) {
+				t.Fatalf("cancellation lost: %v", result.err)
+			}
+			if tc.wantStatus == uploadSent && !tc.replace {
+				entries, err := os.ReadDir(dir)
+				if err != nil || len(entries) != 0 {
+					t.Fatalf("original directory should still exist, but be empty: %v, %v", entries, err)
+				}
+			} else if tc.replace {
+				checkUploadTestContents(t, path, "replacement")
+				checkUploadTestContents(t, path+".original", tc.content)
+			} else {
+				checkUploadTestContents(t, path, tc.content)
+			}
+		})
+	}
+}
+
+func TestUploadKeepsInputDirectoryAfterDelete(t *testing.T) {
+	dir := t.TempDir()
+	writeUploadTestSource(t, filepath.Join(dir, "data.txt"), "hello")
+	api := tg.NewClient(peerTestInvoker(func(_ context.Context, in bin.Encoder, out bin.Decoder) error {
+		switch in.(type) {
+		case *tg.HelpGetAppConfigRequest:
+			return errors.New("unavailable")
+		case *tg.UploadSaveFilePartRequest:
+			out.(*tg.BoolBox).Bool = &tg.BoolTrue{}
+		case *tg.MessagesSendMediaRequest:
+			out.(*tg.UpdatesBox).Updates = &tg.UpdatesTooLong{}
+		default:
+			t.Fatalf("unexpected RPC %T", in)
+		}
+		return nil
+	}))
+	if err := Upload(t.Context(), api, &Peer{Input: &tg.InputPeerSelf{}}, UploadOptions{Path: dir, Threads: 1, DeleteAfter: true}); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("input directory should still exist, but be empty: %v, %v", entries, err)
+	}
+}
+
 func TestVideoAttributes(t *testing.T) {
 	for _, tc := range []struct {
 		name, input string
@@ -292,12 +396,8 @@ func TestDetectMIME(t *testing.T) {
 		{"ebml", "\x1a\x45\xdf\xa3", "application/octet-stream"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), tc.name)
-			if err := os.WriteFile(path, []byte(tc.header), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			if got := detectMIME(path); got != tc.want {
-				t.Fatalf("detectMIME(%q) = %q，期望 %q", tc.name, got, tc.want)
+			if got := detectUploadMIME(tc.name, strings.NewReader(tc.header)); got != tc.want {
+				t.Fatalf("detectUploadMIME(%q) = %q，期望 %q", tc.name, got, tc.want)
 			}
 		})
 	}
@@ -313,6 +413,11 @@ func TestCollectFilesSkipsSymlinks(t *testing.T) {
 	if err := os.Symlink(file, link); err != nil {
 		t.Skipf("cannot create symlinks: %v", err)
 	}
+	recovery := filepath.Join(dir, uploadQuarantinePrefix+"test")
+	if err := os.Mkdir(recovery, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeUploadTestSource(t, filepath.Join(recovery, uploadQuarantinedName), "preserved for manual recovery")
 	got, isDir, err := collectFiles(dir)
 	if err != nil || !isDir || !slices.Equal(got, []string{file}) {
 		t.Fatalf("collectFiles directory = %v, %v, %v", got, isDir, err)

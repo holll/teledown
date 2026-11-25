@@ -242,14 +242,14 @@ func BuildFilename(originalName, messageText string, fileID int64, mime string) 
 	return fmt.Sprintf("%d%s", fileID, ext)
 }
 
-// ResolveSavePath 处理重名文件：
-// 同名且大小相同视为已下载（返回 true）；否则依次尝试 name(2).ext、name(3).ext。
-func ResolveSavePath(path string, size int64) (exists bool, target string) {
-	exists, target, _ = resolveSavePath(os.Lstat, path, size)
+// ResolveSavePath finds an unoccupied filename. A size alone cannot establish
+// media identity, so this helper never reports an existing download.
+func ResolveSavePath(path string, _ int64) (exists bool, target string) {
+	exists, target, _ = resolveSavePath(os.Lstat, path, nil)
 	return exists, target
 }
 
-func resolveSavePath(lstat func(string) (os.FileInfo, error), path string, size int64) (bool, string, error) {
+func resolveSavePath(lstat func(string) (os.FileInfo, error), path string, matches func(string, os.FileInfo) (bool, error)) (bool, string, error) {
 	ext := filepath.Ext(path)
 	base := strings.TrimSuffix(path, ext)
 	target := path
@@ -261,8 +261,10 @@ func resolveSavePath(lstat func(string) (os.FileInfo, error), path string, size 
 		if err != nil {
 			return false, "", err
 		}
-		if size > 0 && info.Mode().IsRegular() && info.Size() == size {
-			return true, target, nil
+		if matches != nil && info.Mode().IsRegular() {
+			if same, err := matches(target, info); err != nil || same {
+				return same, target, err
+			}
 		}
 		target = fmt.Sprintf("%s(%d)%s", base, i, ext)
 	}

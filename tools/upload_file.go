@@ -21,10 +21,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gotd/td/bin"
 	"github.com/gotd/td/telegram/message"
 	"github.com/gotd/td/telegram/message/styling"
 	"github.com/gotd/td/telegram/uploader"
 	"github.com/gotd/td/tg"
+	"github.com/gotd/td/tgerr"
 )
 
 // UploadOptions 是上传命令的参数。
@@ -75,6 +77,9 @@ func uploadPartsLimit(ctx context.Context, client uploadConfigClient, premium bo
 }
 
 func uploadPartSize(size int64, maxParts int, premium bool) (int, error) {
+	if size <= 0 {
+		return 0, errors.New("不上传空文件（0 字节）")
+	}
 	maxBytes := int64(maxParts) * uploader.MaximumPartSize
 	if size > maxBytes {
 		tier := "普通账号"
@@ -149,62 +154,56 @@ func Upload(ctx context.Context, api *tg.Client, peer *Peer, opt UploadOptions) 
 		return fmt.Errorf("路径 %s 下没有可上传的文件", opt.Path)
 	}
 
-	maxParts := uploadPartsLimit(ctx, api, opt.Premium)
-	var failed int
-	for _, path := range files {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		if err := uploadOne(ctx, api, peer.Input, path, opt, maxParts); err != nil {
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-			if !isDir {
-				return fmt.Errorf("上传 %s 失败: %w", filepath.Base(path), err)
-			}
-			fmt.Printf("上传出错 %s: %v\n", filepath.Base(path), err)
-			failed++
-			continue
-		}
+	var maxParts int
+	if ctx.Err() == nil {
+		maxParts = uploadPartsLimit(ctx, api, opt.Premium)
 	}
-
-	if isDir && failed == 0 {
-		// 与 Python 版一致：整目录上传完成后，若目录已空则删除
-		if entries, err := os.ReadDir(opt.Path); err == nil && len(entries) == 0 {
-			_ = os.Remove(opt.Path)
-		}
-	}
-	if failed > 0 {
-		return fmt.Errorf("有 %d 个文件上传失败", failed)
-	}
-	return nil
+	return runUploadBatch(ctx, os.Stdout, files, isDir, func(ctx context.Context, path string) uploadResult {
+		return uploadOne(ctx, api, peer.Input, path, opt, maxParts)
+	})
 }
 
-func uploadOne(ctx context.Context, api *tg.Client, peer tg.InputPeerClass, path string, opt UploadOptions, maxParts int) error {
+func uploadOne(ctx context.Context, api *tg.Client, peer tg.InputPeerClass, path string, opt UploadOptions, maxParts int) uploadResult {
+	fail := func(err error) uploadResult { return uploadResult{status: uploadFailed, err: err} }
 	path, err := filepath.Abs(path)
 	if err != nil {
-		return fmt.Errorf("获取上传文件的绝对路径: %w", err)
+		return fail(fmt.Errorf("获取上传文件的绝对路径: %w", err))
 	}
-	info, err := os.Lstat(path)
+	parent, err := os.OpenRoot(filepath.Dir(path))
 	if err != nil {
-		return fmt.Errorf("读取文件信息失败: %w", err)
+		return fail(fmt.Errorf("打开源文件目录失败: %w", err))
+	}
+	defer parent.Close()
+	name := filepath.Base(path)
+	info, err := parent.Lstat(name)
+	if err != nil {
+		return fail(fmt.Errorf("读取文件信息失败: %w", err))
 	}
 	if !info.Mode().IsRegular() {
-		return fmt.Errorf("不上传非普通文件: %s", path)
+		return fail(fmt.Errorf("不上传非普通文件: %s", path))
 	}
 	partSize, err := uploadPartSize(info.Size(), maxParts, opt.Premium)
 	if err != nil {
-		return err
+		return fail(err)
 	}
-	name := filepath.Base(path)
-	mimeType := detectMIME(path)
+	f, err := parent.Open(name)
+	if err != nil {
+		return fail(fmt.Errorf("打开源文件失败: %w", err))
+	}
+	// Keep the descriptor live through cleanup so the uploaded inode cannot be
+	// reclaimed and reused by a replacement at the same path.
+	defer f.Close()
+	if err := checkUploadSource(f, info); err != nil {
+		return fail(err)
+	}
+	mimeType := detectUploadMIME(path, io.NewSectionReader(f, 0, info.Size()))
 
 	var videoAttr *tg.DocumentAttributeVideo
 	isVideo := strings.HasPrefix(mimeType, "video/")
 	if isVideo {
 		videoAttr = probeVideoAttributes(ctx, path)
 		if ctx.Err() != nil {
-			return ctx.Err()
+			return fail(ctx.Err())
 		}
 		if videoAttr == nil {
 			fmt.Printf("提示：未能读取视频元信息（请检查 ffprobe 与视频文件），%s 将以普通文件上传\n", name)
@@ -215,7 +214,7 @@ func uploadOne(ctx context.Context, api *tg.Client, peer tg.InputPeerClass, path
 	if videoAttr != nil {
 		thumb, err := ExtractThumbnail(ctx, path)
 		if ctx.Err() != nil {
-			return ctx.Err()
+			return fail(ctx.Err())
 		}
 		switch {
 		case err != nil:
@@ -239,9 +238,9 @@ func uploadOne(ctx context.Context, api *tg.Client, peer tg.InputPeerClass, path
 
 	partClient := uploadPartRetryClient{Client: api}
 	up := uploader.NewUploader(partClient).WithThreads(opt.Threads).WithProgress(bar).WithPartSize(partSize)
-	uploaded, err := uploadFileBytes(ctx, up, path, info)
+	uploaded, err := uploadFileBytes(ctx, up, f, info)
 	if err != nil {
-		return fmt.Errorf("上传文件分片失败: %w", err)
+		return fail(fmt.Errorf("上传文件分片失败: %w", errors.Join(err, ctx.Err())))
 	}
 
 	var thumbInput tg.InputFileClass
@@ -272,44 +271,83 @@ func uploadOne(ctx context.Context, api *tg.Client, peer tg.InputPeerClass, path
 	if thumbInput != nil {
 		doc = doc.Thumb(thumbInput)
 	}
-	// 文件分片已上传；提交失败直接返回，不重传文件，也不生成新随机 ID 重发消息。
-	if _, err := message.NewSender(api).To(peer).Media(ctx, doc); err != nil {
+	if err := ctx.Err(); err != nil {
+		return fail(fmt.Errorf("文件分片已上传，尚未提交媒体消息: %w", err))
+	}
+	// Track entry into the actual SendMedia invocation, so an SDK preparation
+	// error is not mistaken for an ambiguous result. Never replay with a new ID.
+	invoker := &uploadMediaInvoker{Invoker: api.Invoker()}
+	if _, err := message.NewSender(tg.NewClient(invoker)).To(peer).Media(ctx, doc); err != nil {
 		TransferStatsFrom(ctx).RecordMediaSendFailure()
-		return fmt.Errorf("文件分片已上传，但发送媒体消息失败: %w", err)
+		status := uploadFailed
+		if invoker.attempted && !definiteUploadRejection(err) {
+			status = uploadUnknown
+		}
+		return uploadResult{status: status, err: fmt.Errorf("文件分片已上传，但未确认媒体消息发送成功: %w", errors.Join(err, ctx.Err()))}
 	}
 
-	// 附件已经发出去，进度条到此收尾；后面删源文件失败不属于上传失败
+	// 附件已经发出去，进度条到此收尾；后面删源文件失败不属于上传失败。
 	bar.Finish(true)
 	finished = true
 	if opt.DeleteAfter {
-		if err := os.Remove(path); err != nil {
-			fmt.Printf("提示：删除源文件失败 %s: %v\n", path, err)
+		if err := removeUploadedSource(parent, name, info); err != nil {
+			fmt.Printf("提示：消息已发送，但删除源文件未完成 %q: %v\n", path, err)
 		}
+	}
+	return uploadResult{status: uploadSent}
+}
+
+type uploadMediaInvoker struct {
+	tg.Invoker
+	attempted bool
+}
+
+func (i *uploadMediaInvoker) Invoke(ctx context.Context, in bin.Encoder, out bin.Decoder) error {
+	if _, ok := in.(*tg.MessagesSendMediaRequest); ok {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		i.attempted = true
+	}
+	return i.Invoker.Invoke(ctx, in, out)
+}
+
+func definiteUploadRejection(err error) bool {
+	var rpc *tgerr.Error
+	// A server-side error or duplicate random ID does not prove that no
+	// message was sent. Ordinary 4xx responses are explicit RPC rejections.
+	return errors.As(err, &rpc) && rpc != nil && rpc.Code >= 400 && rpc.Code < 500 &&
+		!rpc.IsType("RANDOM_ID_DUPLICATE")
+}
+
+func checkUploadSource(f *os.File, expected fs.FileInfo) error {
+	info, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if !sameUploadSource(expected, info) {
+		return errors.New("待上传文件在预检后发生变化，请重新执行")
 	}
 	return nil
 }
 
-func uploadFileBytes(ctx context.Context, up *uploader.Uploader, path string, expected fs.FileInfo) (uploaded tg.InputFileClass, err error) {
-	f, err := os.Open(path)
-	if err != nil {
+func uploadFileBytes(ctx context.Context, up *uploader.Uploader, f *os.File, expected fs.FileInfo) (tg.InputFileClass, error) {
+	if err := checkUploadSource(f, expected); err != nil {
 		return nil, err
-	}
-	defer func() { err = errors.Join(err, f.Close()) }()
-
-	info, err := f.Stat()
-	if err != nil {
-		return nil, err
-	}
-	if !info.Mode().IsRegular() || !os.SameFile(expected, info) || expected.Size() != info.Size() {
-		return nil, errors.New("待上传文件在预检后发生变化，请重新执行")
 	}
 	// Use exactly the size checked above instead of recomputing it in FromPath.
-	reader := &io.LimitedReader{R: f, N: info.Size()}
-	uploaded, err = up.Upload(ctx, uploader.NewUpload(info.Name(), reader, info.Size()))
-	if err == nil && reader.N != 0 {
+	reader := &io.LimitedReader{R: f, N: expected.Size()}
+	uploaded, err := up.Upload(ctx, uploader.NewUpload(expected.Name(), reader, expected.Size()))
+	if err != nil {
+		return nil, err
+	}
+	if reader.N != 0 {
 		return nil, fmt.Errorf("待上传文件提前结束，少读取 %d 字节", reader.N)
 	}
-	return uploaded, err
+	if err := checkUploadSource(f, expected); err != nil {
+		return nil, err
+	}
+	return uploaded, nil
 }
 
 // collectFiles 收集待上传文件，目录递归收集并按路径排序（与 Python 版一致）。
@@ -329,6 +367,11 @@ func collectFiles(path string) (files []string, isDir bool, err error) {
 		if err != nil {
 			return err
 		}
+		// Files left behind by interrupted cleanup are for manual recovery,
+		// not for automatic upload in the next directory batch.
+		if p != path && d.IsDir() && strings.HasPrefix(d.Name(), uploadQuarantinePrefix) {
+			return filepath.SkipDir
+		}
 		if d.Type().IsRegular() {
 			files = append(files, p)
 		}
@@ -341,22 +384,16 @@ func collectFiles(path string) (files []string, isDir bool, err error) {
 	return files, true, nil
 }
 
-// detectMIME 识别文件头；无法区分格式时，优先保留兼容的扩展名类型。
-func detectMIME(path string) string {
+// detectUploadMIME 识别文件头；无法区分格式时，优先保留兼容的扩展名类型。
+func detectUploadMIME(path string, reader io.Reader) string {
 	const binary = "application/octet-stream"
 	ext := strings.ToLower(filepath.Ext(path))
 	byExt := baseMIME(mime.TypeByExtension(ext))
 	if byExt == "" {
 		byExt = binary
 	}
-	f, err := os.Open(path)
-	if err != nil {
-		return byExt
-	}
-	defer f.Close()
-
 	var header [512]byte
-	n, err := io.ReadFull(f, header[:])
+	n, err := io.ReadFull(reader, header[:])
 	if n == 0 || (err != nil && err != io.ErrUnexpectedEOF) {
 		return byExt
 	}

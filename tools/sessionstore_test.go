@@ -45,6 +45,26 @@ func reopen(t *testing.T, s *SessionStore) *SessionStore {
 	return openTestStore(t, s.path)
 }
 
+func TestSessionInitializationFailureLeavesNoFinalFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "account.teledown.sqlite3")
+	failure := errors.New("injected initialization failure")
+	err := createSessionStore(path, func(s *SessionStore) error {
+		if err := s.init(); err != nil {
+			return err
+		}
+		return failure
+	})
+	if !errors.Is(err, failure) {
+		t.Fatalf("createSessionStore() = %v", err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("failed initialization left files: %v, %v", entries, err)
+	}
+	openTestStore(t, path)
+}
+
 func TestSessionStoreOpaquePayload(t *testing.T) {
 	ctx := t.Context()
 	s := newTestStore(t)

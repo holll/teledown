@@ -318,6 +318,9 @@ func downloadWithResume(ctx context.Context, client *telegram.Client, root *os.R
 		return fmt.Errorf("打开断点续传状态失败: %w", err)
 	}
 	defer state.close()
+	if err := probeDownloadLink(root, state.part, target, root.Link); err != nil {
+		return err
+	}
 	defer func() {
 		if err == nil || errors.Is(err, errDownloadMediaChanged) {
 			if cleanupErr := state.remove(); cleanupErr != nil {
@@ -382,5 +385,5 @@ func downloadWithResume(ctx context.Context, client *telegram.Client, root *os.R
 	if _, err := checkDownloadResumeFile(root, state.part, state.data, ""); err != nil {
 		return err
 	}
-	return publishDownload(ctx, root, state.data, state.part, target, id.Size)
+	return publishDownload(ctx, root, state.data, state.part, target, mediaProofPath(target, info), id.Size)
 }

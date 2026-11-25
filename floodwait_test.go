@@ -42,6 +42,18 @@ func floodWait(seconds int) error {
 	return tgerr.New(420, fmt.Sprintf("FLOOD_WAIT_%d", seconds))
 }
 
+func TestSendCodeFloodWaitDoesNotRetry(t *testing.T) {
+	for _, want := range []error{floodWait(20), tgerr.New(420, "FLOOD_TEST_PHONE_WAIT_20")} {
+		next := &scriptedInvoker{errs: []error{want, nil}}
+		ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+		got := new(floodWaitMiddleware).Handle(next)(ctx, &tg.AuthSendCodeRequest{}, nil)
+		cancel()
+		if !errors.Is(got, want) || next.calls != 1 {
+			t.Errorf("发码应只调用一次并保留服务端错误：calls=%d err=%v", next.calls, got)
+		}
+	}
+}
+
 // 可接受的等待时长：原样把限流错误交回给 SimpleWaiter（它负责真的等待并重试），
 // 同时打出一条中文进度提示。
 func TestFloodLogInvokerPassesRetryableWait(t *testing.T) {

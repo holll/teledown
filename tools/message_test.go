@@ -236,7 +236,7 @@ func TestEachMessageByIDPeer(t *testing.T) {
 					} {
 						rows = append(rows, &tg.Message{ID: 13 + i, PeerID: p})
 					}
-					rows = append(rows, &tg.Message{ID: 20, PeerID: tc.match})
+					rows = append(rows, &tg.Message{ID: 20, PeerID: tc.match}, &tg.Message{ID: 20, PeerID: tc.match}, &tg.Message{ID: 99, PeerID: tc.match})
 					slices.Reverse(rows)
 					if mode == RangeSingle {
 						// 单个请求的 ID 也可能属于其他会话。
@@ -263,8 +263,16 @@ func TestEachMessageByIDPeer(t *testing.T) {
 				if tc.name == "self" {
 					wantSelf = 1
 				}
-				if err != nil || selfCalls != wantSelf || messageCalls != 1 || !reflect.DeepEqual(got, want) {
-					t.Fatalf("err=%v selfCalls=%d messageCalls=%d got=%v want=%v", err, selfCalls, messageCalls, got, want)
+				var wantMissing []int
+				for _, id := range ids {
+					if !slices.Contains(want, id) {
+						wantMissing = append(wantMissing, id)
+					}
+				}
+				slices.Sort(wantMissing)
+				var missing *MissingMessageIDsError
+				if !errors.As(err, &missing) || !slices.Equal(missing.IDs, wantMissing) || selfCalls != wantSelf || messageCalls != 1 || !slices.Equal(got, want) {
+					t.Fatalf("err=%v wantMissing=%v selfCalls=%d messageCalls=%d got=%v want=%v", err, wantMissing, selfCalls, messageCalls, got, want)
 				}
 			})
 		}

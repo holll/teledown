@@ -84,39 +84,67 @@ func OpenSessionStore(path string) (*SessionStore, error) {
 			return nil, fmt.Errorf("检查会话库辅助文件失败: %w", err)
 		}
 	}
-	f, err := os.OpenFile(abs, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	created := err == nil
-	switch {
-	case created:
-		if err := f.Close(); err != nil {
-			return nil, fmt.Errorf("关闭新会话库文件 %s 失败: %w", path, err)
+	if _, err := os.Lstat(abs); errors.Is(err, os.ErrNotExist) {
+		if err := createSessionStore(abs, func(s *SessionStore) error { return s.init() }); err != nil {
+			return nil, fmt.Errorf("创建会话库 %s 失败: %w", path, err)
 		}
-	case errors.Is(err, os.ErrExist):
-		if err := verifySessionHeader(abs); err != nil {
-			return nil, fmt.Errorf("拒绝打开会话库 %s: %w", path, err)
-		}
-	default:
-		return nil, fmt.Errorf("创建会话库 %s 失败: %w", path, err)
+	} else if err != nil {
+		return nil, fmt.Errorf("检查会话库 %s 失败: %w", path, err)
+	}
+	if err := verifySessionHeader(abs); err != nil {
+		return nil, fmt.Errorf("拒绝打开会话库 %s: %w", path, err)
 	}
 
-	db, err := sql.Open("sqlite", sessionDSN(abs))
+	s, err := openSQLiteSession(abs)
 	if err != nil {
 		return nil, fmt.Errorf("打开会话库 %s 失败: %w", path, err)
 	}
-	db.SetMaxOpenConns(1)
-	db.SetMaxIdleConns(1)
-
-	s := &SessionStore{path: abs, db: db}
-	if created {
-		err = s.init()
-	} else {
-		err = s.verifySchema()
-	}
-	if err != nil {
-		_ = db.Close()
+	if err := s.verifySchema(); err != nil {
+		_ = s.Close()
 		return nil, fmt.Errorf("打开会话库 %s 失败: %w", path, err)
 	}
 	return s, nil
+}
+
+func openSQLiteSession(abs string) (*SessionStore, error) {
+	db, err := sql.Open("sqlite", sessionDSN(abs))
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	return &SessionStore{path: abs, db: db}, nil
+}
+
+func createSessionStore(abs string, initialize func(*SessionStore) error) error {
+	// Initialize privately before publishing the path. A concurrent first
+	// invocation can only see the whole committed schema, never an empty file.
+	stage, err := os.MkdirTemp(filepath.Dir(abs), ".teledown-session-*.new")
+	if err != nil {
+		return err
+	}
+	// SQLite may leave a journal next to the staging file on an I/O failure.
+	defer os.RemoveAll(stage)
+	tmp := filepath.Join(stage, "session.sqlite3")
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	s, err := openSQLiteSession(tmp)
+	if err != nil {
+		return err
+	}
+	initErr := initialize(s)
+	if err := errors.Join(initErr, s.Close()); err != nil {
+		return err
+	}
+	if err := os.Link(tmp, abs); err != nil && !errors.Is(err, os.ErrExist) {
+		return fmt.Errorf("发布已初始化的会话库（需要文件系统支持硬链接）: %w", err)
+	}
+	return nil
 }
 
 func privateFileInfo(path string) (os.FileInfo, error) {

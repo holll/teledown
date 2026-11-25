@@ -47,6 +47,11 @@ func (m *floodWaitMiddleware) Handle(next tg.Invoker) telegram.InvokeFunc {
 		WithMaxWait(floodSleepThreshold)
 
 	return func(ctx context.Context, input bin.Encoder, output bin.Decoder) error {
+		// 发码不是文件传输。将服务端等待错误原样交给登录流程，避免
+		// 通用限流策略一边等待一边自动触发新的验证码请求。
+		if _, login := input.(*tg.AuthSendCodeRequest); login {
+			return next.Invoke(ctx, input, output)
+		}
 		// 每次请求一个独立的 invoker，重试计数才不会跨请求累加
 		return waiter.Handle(&floodLogInvoker{next: next, middleware: m})(ctx, input, output)
 	}

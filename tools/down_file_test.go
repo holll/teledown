@@ -21,6 +21,41 @@ import (
 	"github.com/gotd/td/tgerr"
 )
 
+type testCDNProvider func(context.Context, int, int64) (downloader.CDN, io.Closer, error)
+
+func (f testCDNProvider) CDN(ctx context.Context, dc int, max int64) (downloader.CDN, io.Closer, error) {
+	return f(ctx, dc, max)
+}
+
+func TestDownloadCDNUsesWaitMiddleware(t *testing.T) {
+	var calls int
+	p := downloadCDNProvider{
+		CDNProvider: testCDNProvider(func(context.Context, int, int64) (downloader.CDN, io.Closer, error) {
+			return tg.NewClient(telegram.InvokeFunc(func(context.Context, bin.Encoder, bin.Decoder) error {
+				t.Fatal("terminal wait must stop the raw CDN invoker")
+				return nil
+			})), nil, nil
+		}),
+		wait: telegram.MiddlewareFunc(func(tg.Invoker) telegram.InvokeFunc {
+			return func(_ context.Context, input bin.Encoder, _ bin.Decoder) error {
+				if _, ok := input.(*tg.UploadGetCDNFileRequest); !ok {
+					t.Fatalf("unexpected request %T", input)
+				}
+				calls++
+				return ErrTransferWaitLimit
+			}
+		}),
+	}
+	cdn, _, err := p.CDN(t.Context(), 1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = cdn.UploadGetCDNFile(t.Context(), &tg.UploadGetCDNFileRequest{})
+	if calls != 1 || !errors.Is(err, ErrTransferWaitLimit) || shouldFallbackDownload(t.Context(), err) {
+		t.Fatalf("calls=%d err=%v, expected terminal wait without fallback", calls, err)
+	}
+}
+
 func downloadTestClient(invoke telegram.InvokeFunc) *telegram.Client {
 	return telegram.NewClient(1, "test", telegram.Options{
 		AllowCDN: true,
@@ -70,7 +105,7 @@ func TestDownloadOnePreservesExistingTemporaryName(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			want := 2
+			want := 3 // existing file + completed media + proof
 			if fail {
 				want = 1
 			}
@@ -368,8 +403,8 @@ func testDownloadOneRefreshesReference(t *testing.T, code string) {
 	if got, err := os.ReadFile(target); err != nil || !bytes.Equal(got, data) {
 		t.Fatalf("引用刷新后内容错误：%q，错误=%v", got, err)
 	}
-	if entries, err := os.ReadDir(dir); err != nil || len(entries) != 1 {
-		t.Fatalf("引用刷新后临时文件未清理：%v，错误=%v", entries, err)
+	if entries, err := os.ReadDir(dir); err != nil || len(entries) != 2 {
+		t.Fatalf("引用刷新后应只剩已发布的媒体及其证明：%v，错误=%v", entries, err)
 	}
 	if staleRequests != 1 || refreshes != 1 {
 		t.Fatalf("stale requests=%d refreshes=%d; want exactly one of each", staleRequests, refreshes)
@@ -557,8 +592,8 @@ func TestDownloadReportsFailuresAndContinues(t *testing.T) {
 			}
 			channel := filepath.Join(dir, "test-7")
 			entries, err := os.ReadDir(channel)
-			if err != nil || len(entries) != 2-failures {
-				t.Fatalf("频道目录应只包含成功下载的文件：%v，错误=%v", entries, err)
+			if err != nil || len(entries) != 2*(2-failures) {
+				t.Fatalf("频道目录应只包含成功下载的文件和证明：%v，错误=%v", entries, err)
 			}
 			for id := 1; id <= 2-failures; id++ {
 				path := filepath.Join(channel, fmt.Sprintf("%d.mp4", id))
@@ -622,6 +657,83 @@ func TestDownloadRejectsLinkedDirectory(t *testing.T) {
 	defer root.Close()
 	if err := ensureDownloadDir(root, "channel"); err == nil {
 		t.Fatal("directory link accepted")
+	}
+}
+
+func TestDownloadKeepsSameNameAndSizeMediaDistinct(t *testing.T) {
+	dir := t.TempDir()
+	channel := filepath.Join(dir, "test-7")
+	if err := os.Mkdir(channel, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(channel, "same.mp4"), []byte("legacy"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	const size = 6
+	data := map[int64]string{31: "first!", 32: "second"}
+	var requests atomic.Int32
+	client := downloadTestClient(func(_ context.Context, input bin.Encoder, output bin.Decoder) error {
+		switch req := input.(type) {
+		case *tg.ChannelsGetMessagesRequest:
+			var rows []tg.MessageClass
+			for _, id := range []int{2, 1} {
+				rows = append(rows, &tg.Message{ID: id, PeerID: &tg.PeerChannel{ChannelID: 7},
+					Media: &tg.MessageMediaDocument{Document: &tg.Document{ID: int64(30 + id), Size: size, MimeType: "video/mp4",
+						Attributes: []tg.DocumentAttributeClass{&tg.DocumentAttributeFilename{FileName: "same.mp4"}}}},
+				})
+			}
+			output.(*tg.MessagesMessagesBox).Messages = &tg.MessagesChannelMessages{Messages: rows}
+		case *tg.UploadGetFileRequest:
+			id := req.Location.(*tg.InputDocumentFileLocation).ID
+			requests.Add(1)
+			output.(*tg.UploadFileBox).File = &tg.UploadFile{Type: &tg.StorageFileMp4{}, Bytes: []byte(data[id])}
+		default:
+			return fmt.Errorf("unexpected RPC %T", input)
+		}
+		return nil
+	})
+	peer := &Peer{Input: &tg.InputPeerChannel{ChannelID: 7}, Title: "test", ID: 7}
+	opt := DownloadOptions{SavePath: dir, Threads: 1, Range: MsgRange{Mode: RangeList, IDs: []int{2, 99, 1}}}
+	run := func(wantRequests int32) {
+		t.Helper()
+		var missing *MissingMessageIDsError
+		if err := Download(t.Context(), client, peer, opt); !errors.As(err, &missing) || len(missing.IDs) != 1 || missing.IDs[0] != 99 {
+			t.Fatalf("expected CLI-visible missing ID after processing available rows, got %v", err)
+		}
+		if got := requests.Load(); got != wantRequests {
+			t.Fatalf("file RPCs = %d, want %d", got, wantRequests)
+		}
+	}
+	run(2) // neither legacy bytes nor the other media may suppress a transfer
+	run(2) // reopen the root and skip exactly the two recorded media
+	if err := os.WriteFile(filepath.Join(channel, "same(2).mp4"), []byte("edited"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	run(3) // same-size tampering invalidates only the changed media's proof
+	for name, expected := range map[string]string{"same.mp4": "legacy", "same(2).mp4": "edited", "same(3).mp4": "second", "same(4).mp4": "first!"} {
+		if got, err := os.ReadFile(filepath.Join(channel, name)); err != nil || string(got) != expected {
+			t.Errorf("%s = %q, want %q, err=%v", name, got, expected, err)
+		}
+	}
+}
+
+func TestDownloadRefreshMissingMessageRetainsMediaChangedError(t *testing.T) {
+	client := downloadTestClient(func(_ context.Context, in bin.Encoder, out bin.Decoder) error {
+		switch in.(type) {
+		case *tg.UploadGetFileRequest:
+			return tgerr.New(400, "FILE_REFERENCE_EXPIRED")
+		case *tg.ChannelsGetMessagesRequest:
+			out.(*tg.MessagesMessagesBox).Messages = &tg.MessagesChannelMessages{Messages: []tg.MessageClass{&tg.MessageEmpty{ID: 5}}}
+			return nil
+		default:
+			return fmt.Errorf("unexpected RPC %T", in)
+		}
+	})
+	info := &mediaInfo{Location: &tg.InputDocumentFileLocation{ID: 1}, FileID: 1, Size: 4}
+	var missing *MissingMessageIDsError
+	err := downloadOne(t.Context(), client, &tg.InputPeerChannel{ChannelID: 7}, &tg.Message{ID: 5}, info, filepath.Join(t.TempDir(), "media"), 1)
+	if !errors.Is(err, errDownloadMediaChanged) || errors.As(err, &missing) {
+		t.Fatalf("reference refresh should retain the changed-media error, got %v", err)
 	}
 }
 
