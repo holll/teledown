@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -46,6 +47,22 @@ type progressBar struct {
 	// now 便于测试注入固定时钟；interactive 表示 stderr 是不是终端。
 	now         func() time.Time
 	interactive bool
+}
+
+var progressOutput struct {
+	sync.Mutex
+	visible *progressBar
+}
+
+// ProgressLogf 把提示写到 stderr；若当前有进度行，先清行，下一次传输回调再绘制进度。
+func ProgressLogf(format string, args ...any) {
+	progressOutput.Lock()
+	defer progressOutput.Unlock()
+	if progressOutput.visible != nil {
+		fmt.Fprint(os.Stderr, "\r\033[K")
+		progressOutput.visible = nil
+	}
+	fmt.Fprintf(os.Stderr, format, args...)
 }
 
 func newProgressBar(name string, total int64) *progressBar {
@@ -91,8 +108,11 @@ func (p *progressBar) reset() {
 // ok 为真时留一条汇总行（已完成的条目会一直留在终端里）；失败时只清掉进行中的一行，
 // 具体错误由调用方打印，避免把两行内容混在一起。
 func (p *progressBar) Finish(ok bool) {
-	if p.interactive {
+	progressOutput.Lock()
+	defer progressOutput.Unlock()
+	if progressOutput.visible == p {
 		fmt.Fprint(os.Stderr, "\r\033[K")
+		progressOutput.visible = nil
 	}
 	if !ok {
 		return
@@ -126,7 +146,10 @@ func (p *progressBar) report(got int64) {
 		return
 	}
 
+	progressOutput.Lock()
+	defer progressOutput.Unlock()
 	fmt.Fprintf(os.Stderr, "\r%s\033[K", p.progressLine(got, now.Sub(p.start)))
+	progressOutput.visible = p
 }
 
 // progressLine 组装进行中的那一行（宽度取当前终端）。

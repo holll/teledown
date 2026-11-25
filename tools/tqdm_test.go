@@ -172,6 +172,35 @@ func TestProgressBarFinishFailureStaysQuiet(t *testing.T) {
 	}
 }
 
+func TestProgressLogKeepsNoticeOnItsOwnLine(t *testing.T) {
+	out := captureStderr(t, func() {
+		bar := newProgressBar("分片.mp4", 100)
+		bar.interactive = true
+		now := bar.start.Add(time.Second)
+		bar.now = func() time.Time { return now }
+		bar.Add(10)
+		ProgressLogf("等待 %ds\n", 9)
+		now = now.Add(time.Second)
+		bar.Add(10)
+		bar.Finish(false)
+	})
+	if !strings.Contains(out, "10.0%") || !strings.Contains(out, "20.0%") || !strings.Contains(out, "\033[K\r\033[K等待 9s\n\r") {
+		t.Fatalf("提示应清除上一行进度，续传后再绘制新进度：%q", out)
+	}
+}
+
+func TestProgressLogRedirectedOutputStaysPlain(t *testing.T) {
+	out := captureStderr(t, func() {
+		bar := newProgressBar("分片.mp4", 100)
+		bar.Add(10)
+		ProgressLogf("等待 9s\n")
+		bar.Finish(false)
+	})
+	if out != "等待 9s\n" {
+		t.Fatalf("重定向时应只输出纯文本提示：%q", out)
+	}
+}
+
 // captureStderr 把 stderr 换成管道，返回函数执行期间写入的内容。
 // 注意要在回调里创建 progressBar：newProgressBar 会读 stderr 判断是不是终端。
 func captureStderr(t *testing.T, fn func()) string {

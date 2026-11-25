@@ -34,7 +34,13 @@ const floodMaxRetries = 3
 // SimpleWaiter 本身是无输出的 invoker，且上限/次数超限时只给英文错误。
 type floodWaitMiddleware struct {
 	mu       sync.Mutex
-	cooldown map[reflect.Type]time.Time
+	cooldown map[reflect.Type]floodCooldown
+}
+
+type floodCooldown struct {
+	until         time.Time
+	logged        bool
+	loggedPremium bool
 }
 
 var _ telegram.Middleware = (*floodWaitMiddleware)(nil)
@@ -63,7 +69,7 @@ func (m *floodWaitMiddleware) waitForCooldown(ctx context.Context, kind reflect.
 			return err
 		}
 		m.mu.Lock()
-		remaining := time.Until(m.cooldown[kind])
+		remaining := time.Until(m.cooldown[kind].until)
 		if remaining <= 0 {
 			delete(m.cooldown, kind)
 		}
@@ -87,16 +93,26 @@ func (m *floodWaitMiddleware) waitForCooldown(ctx context.Context, kind reflect.
 	}
 }
 
-func (m *floodWaitMiddleware) recordCooldown(kind reflect.Type, wait time.Duration) {
-	until := time.Now().Add(wait)
+func (m *floodWaitMiddleware) recordCooldown(kind reflect.Type, wait time.Duration, retry, premium bool) (logWait, logPremium bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.cooldown == nil {
-		m.cooldown = make(map[reflect.Type]time.Time)
+		m.cooldown = make(map[reflect.Type]floodCooldown)
 	}
-	if until.After(m.cooldown[kind]) {
-		m.cooldown[kind] = until
+	now := time.Now()
+	state := m.cooldown[kind]
+	if !state.until.After(now) {
+		state = floodCooldown{}
 	}
+	if until := now.Add(wait); until.After(state.until) {
+		state.until = until
+	}
+	logWait = retry && !state.logged
+	logPremium = retry && premium && !state.loggedPremium
+	state.logged = state.logged || logWait
+	state.loggedPremium = state.loggedPremium || logPremium
+	m.cooldown[kind] = state
+	return logWait, logPremium
 }
 
 // floodLogInvoker 夹在 SimpleWaiter 与真正的 invoker 之间，负责两件事：
@@ -155,12 +171,9 @@ func (i *floodLogInvoker) Invoke(ctx context.Context, input bin.Encoder, output 
 	// Only FLOOD_* rate limits share cooldowns across calls; slow mode and
 	// other operation-local waits must not stall unrelated traffic.
 	seconds := max(1, rpc.Argument)
+	shared := rpc.Code == 420 && rpc.IsOneOf(tgerr.FloodWaitErrors...)
 	switch {
-	case rpc.Code == 420 && rpc.IsOneOf(tgerr.FloodWaitErrors...):
-		if kind != nil {
-			const maxSeconds = int64(1<<63-1) / int64(time.Second)
-			i.middleware.recordCooldown(kind, time.Duration(min(int64(seconds), maxSeconds))*time.Second)
-		}
+	case shared:
 	case rpc.Code == 420 && rpc.IsOneOf("SLOWMODE_WAIT", "2FA_CONFIRM_WAIT", "TAKEOUT_INIT_DELAY", "FLOOD_TEST_PHONE_WAIT"):
 	case rpc.Code == 420 && rpc.IsType("FLOOD_SKIP_FAILED_WAIT"),
 		rpc.Code == 500 && rpc.IsType("WORKER_BUSY_TOO_LONG_RETRY"):
@@ -169,25 +182,38 @@ func (i *floodLogInvoker) Invoke(ctx context.Context, input bin.Encoder, output 
 		return err
 	}
 	// 先比较秒数，避免转换成纳秒时溢出。
-	if seconds > int(floodSleepThreshold/time.Second) {
+	tooLong := seconds > int(floodSleepThreshold/time.Second)
+	premium := rpc.IsOneOf(tgerr.ErrPremiumFloodWait)
+	logWait, logPremium := true, premium
+	if shared && kind != nil {
+		const maxSeconds = int64(1<<63-1) / int64(time.Second)
+		logWait, logPremium = i.middleware.recordCooldown(kind,
+			time.Duration(min(int64(seconds), maxSeconds))*time.Second,
+			!tooLong && i.attempts < floodMaxRetries, premium)
+	}
+	if tooLong {
 		return fmt.Errorf("触发限流，需等待 %d 秒（超过 %s 的自动等待上限），请稍后再试：%v: %w",
 			seconds, floodSleepThreshold, err, tools.ErrTransferWaitLimit)
 	}
 	wait := time.Duration(seconds) * time.Second
 
 	i.attempts++
-	attempt := i.attempts
-	if attempt > floodMaxRetries {
+	if i.attempts > floodMaxRetries {
 		return fmt.Errorf("连续 %d 次被限流（每次都已等满服务端要求），仍未能通过，请稍后再试：%v: %w",
 			floodMaxRetries, err, tools.ErrTransferWaitLimit)
 	}
 
 	tools.TransferStatsFrom(ctx).RecordFloodWait(transferWaitClass(input), wait)
-	detail := ""
-	if rpc.IsOneOf(tgerr.ErrPremiumFloodWait) {
-		detail = "（Telegram 返回 FLOOD_PREMIUM_WAIT，免费账号的传输速率限制）"
+	const premiumDetail = "Telegram 返回 FLOOD_PREMIUM_WAIT，免费账号的传输速率限制"
+	if logWait {
+		detail := ""
+		if logPremium {
+			detail = "（" + premiumDetail + "）"
+		}
+		tools.ProgressLogf("触发限流，等待至少 %s 后自动重试（单个请求最多重试 %d 次）%s\n",
+			wait, floodMaxRetries, detail)
+	} else if logPremium {
+		tools.ProgressLogf("补充限流原因：%s\n", premiumDetail)
 	}
-	fmt.Printf("触发限流，等待 %s 后自动重试（第 %d/%d 次）%s\n",
-		wait.Round(time.Second), attempt, floodMaxRetries, detail)
 	return err
 }

@@ -430,7 +430,7 @@ func runDownload(ctx context.Context, client *telegram.Client, info *mediaInfo, 
 
 	// CDN transport fallback starts over: default master writes in the first
 	// pass are unverified and cannot be merged with verified direct writes.
-	fmt.Fprintf(os.Stderr, "\nCDN 下载失败，降级到主 DC 重试: %s（%v）\n", info.Name, err)
+	ProgressLogf("CDN 下载失败，禁用 CDN 重定向后重试: %s（%v）\n", info.Name, err)
 	if err := prepareDownloadFile(ctx, file, info); err != nil {
 		return err
 	}

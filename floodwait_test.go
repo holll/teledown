@@ -15,6 +15,7 @@ import (
 	"teledown-go/tools"
 
 	"github.com/gotd/td/bin"
+	"github.com/gotd/td/telegram"
 	"github.com/gotd/td/tg"
 	"github.com/gotd/td/tgerr"
 )
@@ -59,21 +60,99 @@ func TestSendCodeFloodWaitDoesNotRetry(t *testing.T) {
 func TestFloodLogInvokerPassesRetryableWait(t *testing.T) {
 	inv := &floodLogInvoker{middleware: &floodWaitMiddleware{}, next: &scriptedInvoker{errs: []error{floodWait(20)}}}
 
-	out := captureStdout(t, func() {
+	out := captureStderr(t, func() {
 		err := inv.Invoke(context.Background(), nil, nil)
 		if _, isFlood := tgerr.AsFloodWait(err); !isFlood {
 			t.Errorf("可等待的限流错误应原样返回，让 SimpleWaiter 继续处理，得到 %v", err)
 		}
 	})
 
-	if !strings.Contains(out, "触发限流，等待 20s") || !strings.Contains(out, "第 1/3 次") {
-		t.Errorf("缺少限流提示或次数，实际输出 %q", out)
+	if !strings.Contains(out, "触发限流，等待至少 20s") || !strings.Contains(out, "单个请求最多重试 3 次") {
+		t.Errorf("缺少限流提示或重试上限，实际输出 %q", out)
+	}
+}
+
+func TestFloodLogMergesConcurrentCooldownNotices(t *testing.T) {
+	stats := new(tools.TransferStats)
+	out := captureStderr(t, func() {
+		synctest.Test(t, func(t *testing.T) {
+			m := new(floodWaitMiddleware)
+			ctx := tools.WithTransferStats(t.Context(), stats)
+			release := make(chan struct{})
+			done := make(chan error, 3)
+			for range 3 {
+				go func() {
+					inv := floodLogInvoker{middleware: m, next: telegram.InvokeFunc(func(context.Context, bin.Encoder, bin.Decoder) error {
+						<-release
+						return floodWait(5)
+					})}
+					done <- inv.Invoke(ctx, &tg.UploadGetFileRequest{}, nil)
+				}()
+			}
+			synctest.Wait()
+			close(release)
+			for range 3 {
+				if _, ok := tgerr.AsFloodWait(<-done); !ok {
+					t.Error("每个分片仍应保留自己的限流重试")
+				}
+			}
+
+			time.Sleep(5 * time.Second)
+			inv := floodLogInvoker{middleware: m, next: &scriptedInvoker{errs: []error{floodWait(9)}}}
+			if _, ok := tgerr.AsFloodWait(inv.Invoke(ctx, &tg.UploadGetFileRequest{}, nil)); !ok {
+				t.Error("下一轮限流仍应正常重试")
+			}
+		})
+	})
+	if strings.Count(out, "触发限流") != 2 || strings.Count(out, "等待至少 5s") != 1 || strings.Count(out, "等待至少 9s") != 1 {
+		t.Errorf("同一轮应只提示一次，新一轮应再提示，实际输出 %q", out)
+	}
+	var report bytes.Buffer
+	stats.Report(&report)
+	if !strings.Contains(report.String(), "下载字节限流：4 次，24s") {
+		t.Errorf("提示去重不应影响等待统计：%s", report.String())
+	}
+}
+
+func TestFloodLogPreservesLatePremiumDiagnostic(t *testing.T) {
+	ordinary := floodWait(20)
+	premium := tgerr.New(420, "FLOOD_PREMIUM_WAIT_25")
+	out := captureStderr(t, func() {
+		synctest.Test(t, func(t *testing.T) {
+			m := new(floodWaitMiddleware)
+			release := make(chan struct{})
+			done := make(chan error, 2)
+			for range 2 {
+				go func() {
+					inv := floodLogInvoker{middleware: m, next: telegram.InvokeFunc(func(context.Context, bin.Encoder, bin.Decoder) error {
+						<-release
+						return premium
+					})}
+					done <- inv.Invoke(t.Context(), &tg.UploadGetFileRequest{}, nil)
+				}()
+			}
+			synctest.Wait()
+			first := floodLogInvoker{middleware: m, next: &scriptedInvoker{errs: []error{ordinary}}}
+			got := first.Invoke(t.Context(), &tg.UploadGetFileRequest{}, nil)
+			close(release)
+			if got != ordinary {
+				t.Errorf("普通限流错误应原样返回，得到 %v", got)
+			}
+			for range 2 {
+				if got := <-done; got != premium {
+					t.Errorf("Premium 限流错误应原样返回，得到 %v", got)
+				}
+			}
+		})
+	})
+	if strings.Count(out, "触发限流") != 1 || strings.Count(out, "FLOOD_PREMIUM_WAIT") != 1 {
+		t.Errorf("同轮等待和后到的 Premium 原因应各提示一次，实际输出 %q", out)
 	}
 }
 
 func TestFloodLogInvokerIdentifiesFreeAccountTransferWait(t *testing.T) {
 	inv := &floodLogInvoker{middleware: &floodWaitMiddleware{}, next: &scriptedInvoker{errs: []error{tgerr.New(420, "FLOOD_PREMIUM_WAIT_20")}}}
-	out := captureStdout(t, func() {
+	out := captureStderr(t, func() {
 		if _, ok := tgerr.AsFloodWait(inv.Invoke(t.Context(), &tg.UploadGetFileRequest{}, nil)); !ok {
 			t.Error("Premium wait should still be passed to the waiter")
 		}
@@ -87,7 +166,7 @@ func TestTransferStatsReportOnlyAcceptedWaits(t *testing.T) {
 	stats := new(tools.TransferStats)
 	ctx := tools.WithTransferStats(t.Context(), stats)
 	m := new(floodWaitMiddleware)
-	captureStdout(t, func() {
+	captureStderr(t, func() {
 		inv := &floodLogInvoker{middleware: m, next: &scriptedInvoker{errs: []error{tgerr.New(420, "SLOWMODE_WAIT_20")}}}
 		_ = inv.Invoke(ctx, &tg.MessagesSendMediaRequest{}, nil)
 		inv = &floodLogInvoker{middleware: m, next: &scriptedInvoker{errs: []error{floodWait(601)}}}
@@ -149,18 +228,18 @@ func TestFloodLogInvokerPassesOtherErrors(t *testing.T) {
 	}
 }
 
-// captureStdout 把 stdout 换成管道，返回回调执行期间写入的内容。
-func captureStdout(t *testing.T, fn func()) string {
+// captureStderr 把 stderr 换成管道，返回回调执行期间写入的内容。
+func captureStderr(t *testing.T, fn func()) string {
 	t.Helper()
-	orig := os.Stdout
+	orig := os.Stderr
 	r, w, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer r.Close()
 	defer w.Close()
-	os.Stdout = w
-	defer func() { os.Stdout = orig }()
+	os.Stderr = w
+	defer func() { os.Stderr = orig }()
 
 	fn()
 
